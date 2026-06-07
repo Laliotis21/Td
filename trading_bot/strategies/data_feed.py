@@ -66,6 +66,44 @@ def fetch_coinbase(product: str, start: str, end: str,
     return np.array(ohlcv, dtype=float)
 
 
+def fetch_polymarket_markets(limit: int = 200, min_volume: float = 50000.0,
+                            lo: float = 0.05, hi: float = 0.95) -> list[dict]:
+    """
+    Ενεργά Polymarket markets από το Gamma API (public, no-key). Κρατά μόνο
+    binary Yes/No markets που είναι (α) ρευστά (volume24hr >= min_volume) και
+    (β) πραγματικά ΑΒΕΒΑΙΑ (implied YES prob στο [lo, hi]) — εκεί υπάρχει value.
+    Επιστρέφει list με {question, yes_prob, spread, volume24hr, liquidity, slug}.
+    """
+    url = ("https://gamma-api.polymarket.com/markets?closed=false&active=true"
+           f"&order=volume24hr&ascending=false&limit={limit}")
+    raw = json.loads(_get(url))
+    out: list[dict] = []
+    for m in raw:
+        try:
+            prices = json.loads(m.get("outcomePrices") or "[]")
+            outs = json.loads(m.get("outcomes") or "[]")
+            if len(prices) != 2 or "Yes" not in outs:
+                continue
+            yes_idx = outs.index("Yes")
+            yes_prob = float(prices[yes_idx])
+            vol = float(m.get("volume24hr") or 0.0)
+        except (ValueError, TypeError):
+            continue
+        if vol < min_volume or not (lo <= yes_prob <= hi):
+            continue
+        out.append({
+            "question": m.get("question", ""),
+            "yes_prob": yes_prob,
+            "spread": float(m.get("spread") or 0.0),
+            "volume24hr": vol,
+            "liquidity": float(m.get("liquidityNum") or 0.0),
+            "slug": m.get("slug", ""),
+            "end": m.get("endDate", ""),
+            "description": (m.get("description") or "")[:600],
+        })
+    return out
+
+
 def fetch_yahoo(symbol: str, interval: str = "1d",
                range_: str = "6mo") -> np.ndarray:
     """
