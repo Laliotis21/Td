@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "risk": {
+    "risk_per_trade": 0.01,
+    "max_open_positions": 5,
+    "rr_ratio": 2.0,
+    "max_daily_drawdown": 0.06,
+    "account_equity": 10000.0
+  },
+  "strategy": {
+    "fast_ma": 12,
+    "slow_ma": 26,
+    "atr_period": 14,
+    "atr_sl_mult": 1.5
+  },
+  "polymarket": {
+    "min_edge": 0.05,
+    "max_stake": 50.0
+  },
+  "llm": {
+    "system_prompt": "You are a disciplined prediction-market analyst for Polymarket. You receive a market question, the current YES/NO order-book prices (implied probabilities), and recent news context. Estimate the true probability of YES, compare it to the market-implied probability, and only recommend a trade when your edge exceeds the configured threshold. Be calibrated and conservative; size by edge, never bet on noise.",
+    "few_shot_lessons": []
+  }
+}
