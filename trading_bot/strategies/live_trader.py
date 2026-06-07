@@ -168,28 +168,51 @@ def replay(symbol: str, start: str, end: str, interval: str, strat: dict,
 
 # ---- LIVE: poll πραγματικά δεδομένα κάθε X δευτερόλεπτα -----------
 def live(symbol: str, interval: str, poll: int, strat: dict, risk: dict,
-        equity: float, fee: float, lev: float, lookback_bars: int = 300) -> None:
-    from datetime import datetime, timezone, timedelta
+        equity: float, fee: float, lev: float, cycles: int = 0) -> None:
+    """
+    Paper live trading: κάθε `poll` δευτερόλεπτα τραβάει φρέσκα candles (Yahoo —
+    καλύπτει stocks/ETFs/crypto) και δρα όταν εμφανιστεί νέα κλεισμένη μπάρα.
+    `cycles>0` -> σταματά μετά από N κύκλους (για bounded demo)· 0 -> ατέρμονο.
+    Stocks/ETFs δίνουν νέες μπάρες ΜΟΝΟ σε ώρες αγοράς· crypto 24/7.
+    """
+    from datetime import datetime, timezone
+
+    from .data_feed import fetch_yahoo
+    # πόσο ιστορικό χρειάζεται το warm-up (π.χ. mean_reversion lookback)
+    yrange = {"1d": "6mo", "1h": "3mo", "30m": "1mo", "15m": "1mo",
+              "5m": "5d", "1m": "5d"}.get(interval, "6mo")
     print(f"LIVE {symbol} {interval} | poll {poll}s | strategy={strat.get('mode')} "
-          f"| DRY-RUN (paper)\n")
+          f"| history {yrange} | DRY-RUN (paper)\n")
     trader = LiveTrader(strat, risk, equity, fee, lev)
     last_n = 0
+    c = 0
     while True:
-        now = datetime.now(timezone.utc)
-        start = (now - timedelta(days=10)).strftime("%Y-%m-%d")
-        end = (now + timedelta(days=1)).strftime("%Y-%m-%d")
         try:
-            ohlcv, _ = fetch(symbol, start, end, interval)
+            ohlcv = fetch_yahoo(symbol, interval, yrange)
         except Exception as exc:  # noqa: BLE001
             print(f"[live] fetch error: {exc}; retry in {poll}s")
-            time.sleep(poll)
-            continue
-        # δράση μόνο όταν εμφανιστεί ΝΕΑ κλεισμένη μπάρα
-        if ohlcv.shape[0] > last_n:
+            ohlcv = None
+        if ohlcv is not None and ohlcv.shape[0] > last_n:
+            new = last_n > 0           # μετά τον 1ο κύκλο, νέα μπάρα
             last_n = ohlcv.shape[0]
-            ts = now.strftime("%H:%M")
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+            tag = "NEW BAR" if new else "INIT"
+            print(f"[{ts}] {tag} — {ohlcv.shape[0]} candles, "
+                  f"last close {ohlcv[-1, 3]:.2f}")
             trader.on_bar(ohlcv, ts)
+            if trader.pos is None and not trader.closed[-1:]:
+                print("           (κανένα σήμα — αναμονή)")
+        c += 1
+        if cycles and c >= cycles:
+            break
         time.sleep(poll)
+
+    s = trader.summary()
+    pos = "FLAT" if trader.pos is None else \
+        f"OPEN {trader.pos.side.upper()} @ {trader.pos.entry:.2f} " \
+        f"(SL {trader.pos.stop:.2f} / TP {trader.pos.target:.2f})"
+    print(f"\n  Κατάσταση: {pos} | closed trades {s['trades']} "
+          f"(W{s['wins']}/L{s['losses']}) | net ${s['net']:+.2f}")
 
 
 def main() -> None:
@@ -205,6 +228,8 @@ def main() -> None:
     ap.add_argument("--end", default="")
     ap.add_argument("--live", action="store_true", help="live polling (paper)")
     ap.add_argument("--poll", type=int, default=60, help="live poll seconds")
+    ap.add_argument("--cycles", type=int, default=0,
+                   help="bounded live: σταμάτα μετά N κύκλους (0=ατέρμονο)")
     args = ap.parse_args()
 
     cfg = json.load(open(args.config, encoding="utf-8"))
@@ -215,7 +240,8 @@ def main() -> None:
     lev = risk.get("max_leverage", 1.0)
 
     if args.live:
-        live(args.symbol, args.interval, args.poll, strat, risk, equity, args.fee, lev)
+        live(args.symbol, args.interval, args.poll, strat, risk, equity,
+             args.fee, lev, cycles=args.cycles)
     else:
         if not (args.start and args.end):
             raise SystemExit("replay χρειάζεται --start και --end (YYYY-MM-DD)")
