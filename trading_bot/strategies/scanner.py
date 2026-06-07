@@ -46,7 +46,8 @@ def _asset_class(sym: str) -> str:
 
 
 def scan(symbols: list[str], strat: dict, risk: dict, interval: str,
-        range_: str) -> list[dict]:
+        range_: str, equity: float = EQUITY, spread_bps: float = 0.0,
+        min_fee: float = 0.0) -> list[dict]:
     rows: list[dict] = []
     lev = risk.get("max_leverage", 1.0)
     for sym in symbols:
@@ -60,8 +61,9 @@ def scan(symbols: list[str], strat: dict, risk: dict, interval: str,
         sig, max_hold = build_signal(ohlcv, strat)
         rep = runner.simulate(ohlcv, sig, strat["atr_period"],
                              strat["atr_sl_mult"], risk["rr_ratio"],
-                             equity=EQUITY, risk_per_trade=risk["risk_per_trade"],
-                             fee_rate=FEE, max_leverage=lev, max_hold=max_hold)
+                             equity=equity, risk_per_trade=risk["risk_per_trade"],
+                             fee_rate=FEE, max_leverage=lev, max_hold=max_hold,
+                             spread_bps=spread_bps, min_fee=min_fee)
         s = rep.summary()
         live = int(sig[-1])  # σήμα στην πιο πρόσφατη μπάρα
         rows.append({

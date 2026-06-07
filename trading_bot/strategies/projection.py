@@ -43,6 +43,12 @@ def _project(capital: float, r_period: float, periods_per_year: float,
 def main() -> None:
     ap = argparse.ArgumentParser(description="Capital projection from backtest")
     ap.add_argument("--capital", type=float, default=100.0)
+    ap.add_argument("--capitals", default="100,1000,10000",
+                   help="comma-separated επίπεδα κεφαλαίου για σύγκριση scaling")
+    ap.add_argument("--spread-bps", type=float, default=5.0,
+                   help="slippage ανά side σε bps (default 5 = 0.05%%)")
+    ap.add_argument("--min-fee", type=float, default=1.0,
+                   help="ελάχιστη προμήθεια ανά side σε $ (fixed broker cost)")
     ap.add_argument("--symbols", default="")
     ap.add_argument("--interval", default="1d")
     ap.add_argument("--range", dest="range_", default="6mo")
@@ -59,45 +65,47 @@ def main() -> None:
     universe = [s.strip() for s in args.symbols.split(",") if s.strip()] \
         or DEFAULT_UNIVERSE
 
-    print(f"Backtesting {len(universe)} instruments "
-          f"(strategy={strat.get('mode')}, {args.interval}/{args.range_})...\n")
-    rows = scan(universe, strat, risk, args.interval, args.range_)
-
-    # το range "6mo" -> 0.5 χρόνια· υπολόγισε period length για annualization
     span_years = {"3mo": 0.25, "6mo": 0.5, "1y": 1.0, "2y": 2.0, "5y": 5.0}\
         .get(args.range_, 0.5)
-    ppyr = 1.0 / span_years  # πόσες τέτοιες περίοδοι σε ένα έτος
+    ppyr = 1.0 / span_years  # περίοδοι ανά έτος (annualization)
 
-    blind = rows
-    hind = [r for r in rows if r["net_pct"] > 0 and r["trades"] >= args.min_trades]
+    capitals = [float(c) for c in args.capitals.split(",")] if args.capitals \
+        else [args.capital]
 
-    cap = args.capital
-    for tag, basket in [("BLIND — όλο το universe equal-weight", blind),
-                        (f"HINDSIGHT — μόνο κερδοφόρα & trades>={args.min_trades}",
-                         hind)]:
-        r = _portfolio_return(basket)
-        ann = (1.0 + r) ** ppyr - 1.0
-        names = ", ".join(f"{x['symbol']}({x['net_pct']:+.1f}%)" for x in basket)
-        print("=" * 70)
-        print(f" {tag}")
-        print(f" Instruments ({len(basket)}): {names or '—'}")
-        print(f" Portfolio return / {args.range_}: {r*100:+.2f}%  "
-              f"-> annualized {ann*100:+.2f}%")
-        if basket:
-            print(f"\n  ${cap:.0f} προβολή (compounding):")
-            for yr in (0.5, 1, 2, 3):
-                eq = cap * (1.0 + r) ** (ppyr * yr)
-                print(f"    μετά {yr:>3} έτος/η : ${eq:8.2f}  "
-                      f"(κέρδος ${eq-cap:+8.2f}, {100*(eq-cap)/cap:+.1f}%)")
+    print(f"Backtesting {len(universe)} instruments "
+          f"(strategy={strat.get('mode')}, {args.interval}/{args.range_}) "
+          f"| frictions: spread {args.spread_bps:.0f}bps, min fee ${args.min_fee:.2f}/side\n")
+
+    for cap in capitals:
+        # ξανατρέχουμε το backtest ΣΤΟ συγκεκριμένο κεφάλαιο (το min_fee κάνει
+        # τις αποδόσεις capital-dependent — μικρό κεφάλαιο τιμωρείται)
+        rows = scan(universe, strat, risk, args.interval, args.range_,
+                   equity=cap, spread_bps=args.spread_bps, min_fee=args.min_fee)
+        blind = rows
+        hind = [r for r in rows if r["net_pct"] > 0 and r["trades"] >= args.min_trades]
+
+        print("#" * 70)
+        print(f"#  ΚΕΦΑΛΑΙΟ ${cap:,.0f}")
+        print("#" * 70)
+        for tag, basket in [("BLIND (όλο το universe)", blind),
+                            (f"HINDSIGHT (κερδοφόρα & trades>={args.min_trades})", hind)]:
+            r = _portfolio_return(basket)
+            ann = (1.0 + r) ** ppyr - 1.0
+            print(f"\n  {tag}: {len(basket)} instruments | "
+                  f"{args.range_} return {r*100:+.2f}% -> annualized {ann*100:+.2f}%")
+            if basket:
+                for yr in (1, 3):
+                    eq = cap * (1.0 + r) ** (ppyr * yr)
+                    print(f"     ${cap:,.0f} -> μετά {yr} έτος/η: ${eq:,.2f} "
+                          f"(κέρδος ${eq-cap:+,.2f})")
         print()
 
     print("⚠️  ΕΠΙΦΥΛΑΞΕΙΣ:")
     print("  • Προβολή ΠΑΡΕΛΘΟΝΤΩΝ backtest, ΟΧΙ πρόβλεψη — το μέλλον θα διαφέρει.")
-    print("  • Το HINDSIGHT set επιλέχθηκε ΑΦΟΥ είδαμε τα αποτελέσματα "
-          "(selection bias) -> αισιόδοξο.")
-    print("  • Με $100: ελάχιστα μεγέθη εντολών/προμήθειες brokers μπορεί να "
-          "κάνουν μη-πρακτικά τα μικρά trades (το backtest αγνοεί minimums/spread).")
-    print("  • Λίγα trades/6μηνο -> χαμηλή στατιστική σημαντικότητα.")
+    print("  • HINDSIGHT = selection bias (διαλέχτηκαν οι νικητές εκ των υστέρων).")
+    print("  • Τώρα ΣΥΜΠΕΡΙΛΑΜΒΑΝΟΝΤΑΙ spread + min fee -> μικρό κεφάλαιο "
+          "τιμωρείται δυσανάλογα.")
+    print("  • Λίγα trades/περίοδο -> χαμηλή στατιστική σημαντικότητα.")
 
 
 if __name__ == "__main__":

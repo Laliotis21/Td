@@ -98,7 +98,8 @@ class BacktestReport:
 def simulate(ohlcv: np.ndarray, sig: np.ndarray, atr_period: int,
             atr_sl_mult: float, rr_ratio: float, equity: float = 10000.0,
             risk_per_trade: float = 0.01, fee_rate: float = 0.0004,
-            max_leverage: float = 1.0, max_hold: int = 0) -> BacktestReport:
+            max_leverage: float = 1.0, max_hold: int = 0,
+            spread_bps: float = 0.0, min_fee: float = 0.0) -> BacktestReport:
     """
     Κοινό execution engine για όλες τις στρατηγικές. Δέχεται έτοιμο per-bar σήμα
     `sig` (+1 long / -1 short / 0). **Ένα position τη φορά**, με:
@@ -106,6 +107,8 @@ def simulate(ohlcv: np.ndarray, sig: np.ndarray, atr_period: int,
       - leverage cap (notional <= max_leverage*equity) -> έλεγχος fees
       - optional time-exit μετά από `max_hold` bars (χρήσιμο σε mean-reversion)
       - 1% risk position sizing στο τρέχον equity (compounding)
+      - ρεαλιστικά frictions: `spread_bps` (slippage ανά side) + `min_fee` (ελάχιστη
+        προμήθεια ανά side — τιμωρεί μικρά trades/μικρά κεφάλαια)
     """
     report = BacktestReport(start_equity=equity, fee_rate=fee_rate)
     if ohlcv.ndim != 2 or ohlcv.shape[0] < 3 or sig.size != ohlcv.shape[0]:
@@ -118,6 +121,8 @@ def simulate(ohlcv: np.ndarray, sig: np.ndarray, atr_period: int,
     cur_equity = equity
     pos: dict | None = None
     for i in range(1, n):
+        if cur_equity <= 0:           # bankruptcy stop
+            break
         # --- έλεγχος εξόδου τρέχουσας θέσης ---
         if pos is not None and i > pos["entry_idx"]:
             exit_price = None
@@ -136,7 +141,8 @@ def simulate(ohlcv: np.ndarray, sig: np.ndarray, atr_period: int,
                     (i - pos["entry_idx"]) >= max_hold:
                 exit_price = float(close[i])
             if exit_price is not None:
-                report.trades.append(_close(pos, exit_price, i, fee_rate))
+                report.trades.append(_close(pos, exit_price, i, fee_rate,
+                                            spread_bps, min_fee))
                 cur_equity += report.trades[-1].net_pnl
                 pos = None
 
@@ -159,7 +165,8 @@ def simulate(ohlcv: np.ndarray, sig: np.ndarray, atr_period: int,
                    "qty": qty, "entry_idx": i}
 
     if pos is not None:  # mark-to-market τυχόν ανοιχτής θέσης
-        report.trades.append(_close(pos, float(close[-1]), n - 1, fee_rate))
+        report.trades.append(_close(pos, float(close[-1]), n - 1, fee_rate,
+                                    spread_bps, min_fee))
     return report
 
 
@@ -174,13 +181,19 @@ def run(ohlcv: np.ndarray, fast_ma: int, slow_ma: int, atr_period: int,
                    risk_per_trade, fee_rate, max_leverage)
 
 
-def _close(pos: dict, exit_price: float, exit_idx: int, fee_rate: float) -> Trade:
+def _close(pos: dict, exit_price: float, exit_idx: int, fee_rate: float,
+          spread_bps: float = 0.0, min_fee: float = 0.0) -> Trade:
     qty, entry = pos["qty"], pos["entry"]
-    if pos["side"] == "buy":
-        gross = (exit_price - entry) * qty
-    else:                                   # short κερδίζει όταν πέφτει η τιμή
-        gross = (entry - exit_price) * qty
-    fee = fee_rate * qty * entry + fee_rate * qty * exit_price
+    hs = spread_bps / 10000.0 / 2.0   # half-spread slippage ανά side
+    if pos["side"] == "buy":           # αγοράζεις ψηλότερα, πουλάς χαμηλότερα
+        eff_entry, eff_exit = entry * (1 + hs), exit_price * (1 - hs)
+        gross = (eff_exit - eff_entry) * qty
+    else:                              # short: πουλάς χαμηλότερα, καλύπτεις ψηλότερα
+        eff_entry, eff_exit = entry * (1 - hs), exit_price * (1 + hs)
+        gross = (eff_entry - eff_exit) * qty
+    # προμήθεια ανά side με ελάχιστο (fixed broker cost τιμωρεί μικρά trades)
+    fee = max(fee_rate * qty * entry, min_fee) + \
+        max(fee_rate * qty * exit_price, min_fee)
     return Trade(pos["entry_idx"], exit_idx, pos["side"], entry, exit_price,
                 qty, gross, fee)
 
