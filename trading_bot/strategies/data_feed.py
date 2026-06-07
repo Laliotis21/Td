@@ -66,6 +66,27 @@ def fetch_coinbase(product: str, start: str, end: str,
     return np.array(ohlcv, dtype=float)
 
 
+def fetch_yahoo(symbol: str, interval: str = "1d",
+               range_: str = "6mo") -> np.ndarray:
+    """
+    Yahoo Finance public chart API — καλύπτει **stocks, ETFs ΚΑΙ crypto** με ένα
+    endpoint (π.χ. AAPL, SPY, GLD, BTC-USD). Επιστρέφει (N,5) [O,H,L,C,V].
+    Φιλτράρει bars με ελλείποντα δεδομένα (None).
+    """
+    url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+           f"?interval={interval}&range={range_}")
+    d = json.loads(_get(url))
+    r = d["chart"]["result"][0]
+    q = r["indicators"]["quote"][0]
+    rows: list[list[float]] = []
+    for o, h, lo, c, v in zip(q["open"], q["high"], q["low"], q["close"],
+                              q["volume"]):
+        if None in (o, h, lo, c):
+            continue
+        rows.append([o, h, lo, c, v or 0.0])
+    return np.array(rows, dtype=float)
+
+
 def fetch_cryptocompare(fsym: str, tsym: str, end: str,
                        interval: str = "1h", limit: int = 72) -> np.ndarray:
     """Fallback: CryptoCompare histohour/histoday. Επιστρέφει τα τελευταία `limit`
