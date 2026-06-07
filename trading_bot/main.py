@@ -15,6 +15,7 @@ import signal
 from dotenv import load_dotenv
 
 from agents.execution_agent import ExecutionAgent
+from agents.livetrader_agent import LiveTraderAgent
 from agents.optimization_agent import OptimizationAgent
 from agents.orchestrator import Orchestrator
 from agents.polymarket_agent import PolymarketAgent
@@ -43,6 +44,7 @@ async def main() -> None:
     agents = [
         TradingViewAgent(bus, db, journal),
         PolymarketAgent(bus, db, journal, config),
+        LiveTraderAgent(bus, db, journal, config),
         ExecutionAgent(bus, db, journal),
         Orchestrator(bus, db, journal, config),
         OptimizationAgent(bus, db, journal, config),
