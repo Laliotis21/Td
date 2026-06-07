@@ -51,25 +51,37 @@ class ExecutionAgent(BaseAgent):
             self.log.warning("Binance keys missing -> forcing DRY_RUN")
             self.dry_run = True
             return None
+        # FUTURES: δικός μας signed REST client (παρακάμπτει το spot ping του
+        # python-binance που γεω-μπλοκάρεται με 451 σε πολλά clouds)
+        if self.market == "futures":
+            from core.binance_futures import BinanceFutures
+            client = BinanceFutures(key, secret, testnet=self.testnet)
+            try:
+                bal = client.available_balance(self.quote)
+                self.log.info("Binance futures testnet=%s AUTH OK — %.2f %s available",
+                              self.testnet, bal, self.quote)
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning("Binance futures auth failed (%s) -> DRY_RUN", exc)
+                self.dry_run = True
+                return None
+            return client
+        # SPOT: python-binance (δουλεύει μόνο όπου το testnet.binance.vision είναι
+        # προσβάσιμο — π.χ. από το μηχάνημά σου, όχι από geo-blocked cloud)
         try:
             from binance.client import Client
         except ImportError:
             self.log.warning("python-binance not installed -> forcing DRY_RUN")
             self.dry_run = True
             return None
-        client = Client(key, secret, testnet=self.testnet)
-        # auth self-check (read-only) -> log balance· αν αποτύχει, πέσε σε DRY_RUN
         try:
-            if self.market == "futures":
-                bal = float(client.futures_account()["availableBalance"])
-            else:
-                acct = client.get_account()
-                bal = next((float(b["free"]) for b in acct["balances"]
-                            if b["asset"] == self.quote), 0.0)
-            self.log.info("Binance %s testnet=%s AUTH OK — %.2f %s available",
-                          self.market, self.testnet, bal, self.quote)
+            client = Client(key, secret, testnet=self.testnet)
+            acct = client.get_account()
+            bal = next((float(b["free"]) for b in acct["balances"]
+                        if b["asset"] == self.quote), 0.0)
+            self.log.info("Binance spot testnet=%s AUTH OK — %.2f %s",
+                          self.testnet, bal, self.quote)
         except Exception as exc:  # noqa: BLE001
-            self.log.warning("Binance auth/connectivity failed (%s) -> DRY_RUN", exc)
+            self.log.warning("Binance spot auth/connectivity failed (%s) -> DRY_RUN", exc)
             self.dry_run = True
             return None
         return client
@@ -81,8 +93,8 @@ class ExecutionAgent(BaseAgent):
         try:
             notional = order.qty * order.entry
             if self.market == "futures":
-                avail = float((await asyncio.to_thread(
-                    self._client.futures_account))["availableBalance"])
+                avail = await asyncio.to_thread(
+                    self._client.available_balance, self.quote)
                 return avail >= notional  # 1x· για leverage ρύθμισε ξεχωριστά
             acct = await asyncio.to_thread(self._client.get_account)
             usdt = next((float(b["free"]) for b in acct["balances"]
@@ -152,21 +164,29 @@ class ExecutionAgent(BaseAgent):
             stopLimitPrice=round(order.stop_loss, 2), stopLimitTimeInForce="GTC")
 
     async def _send_futures(self, order: OrderIntent, side: str, sym: str) -> None:
-        """Futures market entry + STOP_MARKET (SL) + TAKE_PROFIT_MARKET (TP).
-        testnet.binancefuture.com — προσβάσιμο και από cloud."""
+        """
+        Futures: MARKET entry + LIMIT take-profit (reduceOnly). Το stop-loss
+        μπαίνει ως STOP_MARKET· αν το testnet το απορρίψει (-4120), γίνεται
+        **bot-managed** (ο LiveTrader το κλείνει client-side) αντί να σκάσει.
+        """
+        from core.binance_futures import BinanceFuturesError
+
         opp = "SELL" if side == "BUY" else "BUY"
-        await asyncio.to_thread(
-            self._client.futures_create_order,  # type: ignore[union-attr]
-            symbol=sym, side=side, type="MARKET", quantity=round(order.qty, 3))
-        # reduce-only protective εντολές
-        await asyncio.to_thread(
-            self._client.futures_create_order,  # type: ignore[union-attr]
-            symbol=sym, side=opp, type="STOP_MARKET",
-            stopPrice=round(order.stop_loss, 2), closePosition=True)
-        await asyncio.to_thread(
-            self._client.futures_create_order,  # type: ignore[union-attr]
-            symbol=sym, side=opp, type="TAKE_PROFIT_MARKET",
-            stopPrice=round(order.take_profit, 2), closePosition=True)
+        qty = round(order.qty, 3)
+        await asyncio.to_thread(self._client.market_order, sym, side, qty)
+        # take-profit ως LIMIT reduce-only (υποστηρίζεται στο testnet)
+        await asyncio.to_thread(self._client.limit_reduce, sym, opp, qty,
+                               round(order.take_profit, 1))
+        # stop-loss: δοκίμασε exchange-side· fallback σε bot-managed
+        try:
+            await asyncio.to_thread(self._client.stop_market, sym, opp, qty,
+                                   round(order.stop_loss, 1))
+        except BinanceFuturesError as exc:
+            if exc.code == self._client.STOP_UNSUPPORTED:
+                self.log.warning("exchange stop-loss unsupported (-4120) -> "
+                                "bot-managed SL @ %.1f", order.stop_loss)
+            else:
+                raise
 
     async def _execute(self, order: OrderIntent) -> ExecutionResult:
         if not await self._has_margin(order):
