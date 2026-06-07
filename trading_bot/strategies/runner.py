@@ -87,7 +87,8 @@ class BacktestReport:
             "return_pct": round(100 * self.net_pnl / self.start_equity, 3),
             "profit_factor": round(metrics.profit_factor(net_series), 3)
                 if net_series.size else 0.0,
-            "sharpe": round(metrics.sharpe_ratio(rets), 3) if rets.size else 0.0,
+            # Sharpe θέλει εύλογο δείγμα· <3 trades -> αναξιόπιστο, δείξε 0.0
+            "sharpe": round(metrics.sharpe_ratio(rets), 3) if rets.size >= 3 else 0.0,
             "max_drawdown_pct": round(100 * metrics.max_drawdown(equity), 3),
             "start_equity": round(self.start_equity, 2),
             "end_equity": round(self.end_equity, 2),
@@ -96,11 +97,15 @@ class BacktestReport:
 
 def run(ohlcv: np.ndarray, fast_ma: int, slow_ma: int, atr_period: int,
        atr_sl_mult: float, rr_ratio: float, equity: float = 10000.0,
-       risk_per_trade: float = 0.01, fee_rate: float = 0.0004) -> BacktestReport:
+       risk_per_trade: float = 0.01, fee_rate: float = 0.0004,
+       max_leverage: float = 1.0) -> BacktestReport:
     """
-    Long-only MA crossover με ATR stop. Κάθε trade ρισκάρει `risk_per_trade` του
-    *τρέχοντος* equity· qty από risk/stop-distance· fee = fee_rate*notional*2
-    (entry+exit). Επιστρέφει αναλυτικό report.
+    Bidirectional MA crossover με ATR stops, **ένα position τη φορά**:
+      cross-up  -> LONG  (stop κάτω, target πάνω)
+      cross-down-> SHORT (stop πάνω, target κάτω)
+    Κάθε trade ρισκάρει `risk_per_trade` του τρέχοντος equity· qty από
+    risk/stop-distance· fee = fee_rate*notional σε entry + exit. Όταν είμαστε σε
+    θέση δεν ανοίγουμε νέα — μπαίνουμε ξανά μόνο αφού κλείσει η προηγούμενη.
     """
     report = BacktestReport(start_equity=equity, fee_rate=fee_rate)
     if ohlcv.ndim != 2 or ohlcv.shape[0] < int(slow_ma) + 2:
@@ -112,40 +117,68 @@ def run(ohlcv: np.ndarray, fast_ma: int, slow_ma: int, atr_period: int,
     atr = _atr(high, low, close, atr_period)
     n = close.size
 
-    cross_up = (fast[:-1] <= slow[:-1]) & (fast[1:] > slow[1:])
-    entries = np.where(cross_up)[0] + 1
+    # signal ανά bar: +1 cross-up, -1 cross-down, 0 τίποτα
+    sig = np.zeros(n, dtype=int)
+    up = (fast[:-1] <= slow[:-1]) & (fast[1:] > slow[1:])
+    dn = (fast[:-1] >= slow[:-1]) & (fast[1:] < slow[1:])
+    sig[1:][up] = 1
+    sig[1:][dn] = -1
 
     cur_equity = equity
-    for i in entries:
-        if i >= n or np.isnan(atr[i]) or atr[i] <= 0:
-            continue
-        entry = float(close[i])
-        stop_dist = atr_sl_mult * float(atr[i])
-        if stop_dist <= 0:
-            continue
-        stop = entry - stop_dist
-        target = entry + rr_ratio * stop_dist
-        risk_amount = cur_equity * risk_per_trade
-        qty = risk_amount / stop_dist          # 1% risk sizing
-        notional = qty * entry
+    pos: dict | None = None
+    for i in range(1, n):
+        # --- έλεγχος εξόδου τρέχουσας θέσης ---
+        if pos is not None and i > pos["entry_idx"]:
+            exit_price = None
+            if pos["side"] == "buy":
+                if low[i] <= pos["stop"]:
+                    exit_price = pos["stop"]
+                elif high[i] >= pos["target"]:
+                    exit_price = pos["target"]
+            else:  # sell / short
+                if high[i] >= pos["stop"]:
+                    exit_price = pos["stop"]
+                elif low[i] <= pos["target"]:
+                    exit_price = pos["target"]
+            if exit_price is not None:
+                report.trades.append(_close(pos, exit_price, i, fee_rate))
+                cur_equity += report.trades[-1].net_pnl
+                pos = None
 
-        exit_price, exit_idx = None, n - 1
-        for j in range(i + 1, n):
-            if low[j] <= stop:
-                exit_price, exit_idx = stop, j
-                break
-            if high[j] >= target:
-                exit_price, exit_idx = target, j
-                break
-        if exit_price is None:                 # ανοιχτό στο τέλος -> κλείσε στο last close
-            exit_price = float(close[-1])
+        # --- άνοιγμα νέας θέσης αν είμαστε flat ---
+        if pos is None and sig[i] != 0 and not np.isnan(atr[i]) and atr[i] > 0:
+            entry = float(close[i])
+            stop_dist = atr_sl_mult * float(atr[i])
+            if stop_dist <= 0:
+                continue
+            qty = (cur_equity * risk_per_trade) / stop_dist  # 1% risk sizing
+            # leverage cap: notional <= max_leverage * equity (αποφυγή fee-bleed)
+            max_qty = (max_leverage * cur_equity) / entry
+            qty = min(qty, max_qty)
+            if sig[i] == 1:                                   # LONG
+                stop, target = entry - stop_dist, entry + rr_ratio * stop_dist
+                side = "buy"
+            else:                                             # SHORT
+                stop, target = entry + stop_dist, entry - rr_ratio * stop_dist
+                side = "sell"
+            pos = {"side": side, "entry": entry, "stop": stop, "target": target,
+                   "qty": qty, "entry_idx": i}
 
-        gross = (exit_price - entry) * qty
-        fee = fee_rate * notional + fee_rate * (qty * exit_price)  # entry + exit
-        report.trades.append(Trade(i, exit_idx, "buy", entry, exit_price, qty,
-                                   gross, fee))
-        cur_equity += gross - fee              # compounding του equity για το sizing
+    # κλείσε τυχόν ανοιχτή θέση στο τελευταίο close (mark-to-market)
+    if pos is not None:
+        report.trades.append(_close(pos, float(close[-1]), n - 1, fee_rate))
     return report
+
+
+def _close(pos: dict, exit_price: float, exit_idx: int, fee_rate: float) -> Trade:
+    qty, entry = pos["qty"], pos["entry"]
+    if pos["side"] == "buy":
+        gross = (exit_price - entry) * qty
+    else:                                   # short κερδίζει όταν πέφτει η τιμή
+        gross = (entry - exit_price) * qty
+    fee = fee_rate * qty * entry + fee_rate * qty * exit_price
+    return Trade(pos["entry_idx"], exit_idx, pos["side"], entry, exit_price,
+                qty, gross, fee)
 
 
 def load_csv(path: str) -> np.ndarray:
@@ -186,6 +219,8 @@ def main() -> None:
                    help="override start equity (αλλιώς από config)")
     ap.add_argument("--fee", type=float, default=0.0004,
                    help="fee rate ανά side (default 0.04%% Binance futures taker)")
+    ap.add_argument("--leverage", type=float, default=None,
+                   help="max leverage cap (notional<=lev*equity· default 1x = spot)")
     args = ap.parse_args()
 
     cfg = json.load(open(args.config, encoding="utf-8"))
@@ -203,10 +238,13 @@ def main() -> None:
         ohlcv = synthetic_ohlcv(args.bars, seed=args.seed)
         source = f"SYNTHETIC {args.bars} 1h bars (seed={args.seed}) — DEMO, όχι πραγματική αγορά"
 
+    leverage = args.leverage if args.leverage is not None \
+        else risk.get("max_leverage", 1.0)
     report = run(
         ohlcv, strat["fast_ma"], strat["slow_ma"], strat["atr_period"],
         strat["atr_sl_mult"], risk["rr_ratio"], equity=equity,
         risk_per_trade=risk["risk_per_trade"], fee_rate=args.fee,
+        max_leverage=leverage,
     )
     s = report.summary()
 
@@ -216,7 +254,8 @@ def main() -> None:
     print(f" Data source     : {source}")
     print(f" Params          : fastMA={strat['fast_ma']} slowMA={strat['slow_ma']} "
           f"ATR={strat['atr_period']} SLx{strat['atr_sl_mult']} RR={risk['rr_ratio']}")
-    print(f" Risk/trade      : {risk['risk_per_trade']*100:.2f}%  | fee/side: {args.fee*100:.3f}%")
+    print(f" Risk/trade      : {risk['risk_per_trade']*100:.2f}%  | fee/side: {args.fee*100:.3f}%"
+          f"  | max lev: {leverage:g}x")
     print("-" * 58)
     print(f" Trades          : {s['n_trades']}  (wins {s['wins']} / losses {s['losses']})")
     print(f" Win rate        : {s['win_rate']*100:.1f}%")

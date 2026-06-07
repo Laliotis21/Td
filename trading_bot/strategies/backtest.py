@@ -38,8 +38,11 @@ def run_backtest(ohlcv: np.ndarray, fast_ma: int, slow_ma: int,
     ohlcv: array σχήματος (N, 5) με στήλες [open, high, low, close, volume].
     Επιστρέφει 1D array με PnL (σε R-multiples) ανά κλεισμένο trade.
 
-    Λογική: long όταν fast SMA διασταυρώνει πάνω από slow SMA· stop = atr_sl_mult*ATR,
-    target = rr_ratio * (entry - stop). Το κάθε trade κλείνει στο πρώτο εκ των SL/TP.
+    Bidirectional, ένα position τη φορά:
+      cross-up   -> LONG  (stop = atr_sl_mult*ATR κάτω, target = rr_ratio*risk πάνω)
+      cross-down -> SHORT (stop πάνω, target κάτω)
+    Κάθε trade -> -1R (stop) ή +rr_ratio R (target). Νέα είσοδος μόνο αφού κλείσει
+    η προηγούμενη θέση.
     """
     if ohlcv.ndim != 2 or ohlcv.shape[1] < 4 or ohlcv.shape[0] < int(slow_ma) + 2:
         return np.array([], dtype=float)
@@ -48,31 +51,41 @@ def run_backtest(ohlcv: np.ndarray, fast_ma: int, slow_ma: int,
     fast = _sma(close, fast_ma)
     slow = _sma(close, slow_ma)
     atr = _atr(high, low, close, atr_period)
+    n = close.size
 
-    cross_up = (fast[:-1] <= slow[:-1]) & (fast[1:] > slow[1:])
-    entries = np.where(cross_up)[0] + 1  # index της επόμενης μπάρας
+    sig = np.zeros(n, dtype=int)
+    up = (fast[:-1] <= slow[:-1]) & (fast[1:] > slow[1:])
+    dn = (fast[:-1] >= slow[:-1]) & (fast[1:] < slow[1:])
+    sig[1:][up] = 1
+    sig[1:][dn] = -1
 
     pnls: list[float] = []
-    n = close.size
-    for i in entries:
-        if i >= n or np.isnan(atr[i]) or atr[i] <= 0:
-            continue
-        entry = close[i]
-        stop = entry - atr_sl_mult * atr[i]
-        risk = entry - stop
-        if risk <= 0:
-            continue
-        target = entry + rr_ratio * risk
-        # προσομοίωση: σκάναρε μπροστά μέχρι SL ή TP
-        outcome = 0.0
-        for j in range(i + 1, n):
-            if low[j] <= stop:
-                outcome = -1.0          # -1R
-                break
-            if high[j] >= target:
-                outcome = rr_ratio      # +rr_ratio R
-                break
-        pnls.append(outcome)
+    pos: dict | None = None
+    for i in range(1, n):
+        if pos is not None and i > pos["i"]:
+            out = None
+            if pos["long"]:
+                if low[i] <= pos["stop"]:
+                    out = -1.0
+                elif high[i] >= pos["target"]:
+                    out = rr_ratio
+            else:
+                if high[i] >= pos["stop"]:
+                    out = -1.0
+                elif low[i] <= pos["target"]:
+                    out = rr_ratio
+            if out is not None:
+                pnls.append(out)
+                pos = None
+        if pos is None and sig[i] != 0 and not np.isnan(atr[i]) and atr[i] > 0:
+            entry = close[i]
+            dist = atr_sl_mult * atr[i]
+            if dist <= 0:
+                continue
+            long = sig[i] == 1
+            stop = entry - dist if long else entry + dist
+            target = entry + rr_ratio * dist if long else entry - rr_ratio * dist
+            pos = {"long": long, "stop": stop, "target": target, "i": i}
 
     return np.array(pnls, dtype=float)
 
