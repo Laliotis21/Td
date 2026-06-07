@@ -172,8 +172,14 @@ def load_csv(path: str) -> np.ndarray:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Currency-accurate backtest runner")
     ap.add_argument("--csv", help="CSV με OHLCV (open,high,low,close,volume)")
+    ap.add_argument("--live", action="store_true",
+                   help="τράβα πραγματικά δεδομένα από public πηγή (Coinbase/CryptoCompare)")
+    ap.add_argument("--symbol", default="BTC-USD", help="π.χ. BTC-USD (live)")
+    ap.add_argument("--start", default="", help="YYYY-MM-DD (live)")
+    ap.add_argument("--end", default="", help="YYYY-MM-DD (live)")
+    ap.add_argument("--interval", default="1h", help="1m|5m|15m|1h|6h|1d (live)")
     ap.add_argument("--bars", type=int, default=72,
-                   help="synthetic 1h bars αν δεν δοθεί CSV (default 72 = 3 ημέρες)")
+                   help="synthetic 1h bars αν δεν δοθεί CSV/live (default 72 = 3 ημέρες)")
     ap.add_argument("--seed", type=int, default=24, help="seed synthetic data")
     ap.add_argument("--config", default="config.json")
     ap.add_argument("--equity", type=float, default=None,
@@ -186,7 +192,11 @@ def main() -> None:
     strat, risk = cfg["strategy"], cfg["risk"]
     equity = args.equity if args.equity is not None else risk["account_equity"]
 
-    if args.csv:
+    if args.live:
+        from .data_feed import fetch
+        ohlcv, source = fetch(args.symbol, args.start, args.end, args.interval)
+        source = f"REAL {source}"
+    elif args.csv:
         ohlcv = load_csv(args.csv)
         source = f"CSV {args.csv} ({ohlcv.shape[0]} bars)"
     else:
