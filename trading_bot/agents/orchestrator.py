@@ -49,7 +49,10 @@ class Orchestrator(BaseAgent):
         sig_q = self.bus.subscribe(TOPIC_SIGNAL)
         reload_q = self.bus.subscribe(TOPIC_CONFIG_RELOAD)
         result_q = self.bus.subscribe(TOPIC_RESULT)
-        self.log.info("orchestrator online (config v%s)", self.config.version)
+        mode = (await self.config.get()).get("strategy", {}).get("mode", "regime")
+        self.log.info("orchestrator online (config v%s, strategy=%s)",
+                      self.config.version, mode)
+        await self.record("strategy.active", f"mode={mode}")
         await asyncio.gather(
             self._handle_signals(sig_q),
             self._handle_reloads(reload_q),
@@ -61,7 +64,9 @@ class Orchestrator(BaseAgent):
         while True:
             msg: ConfigReload = await q.get()
             await self.config.load()  # atomic swap στο config manager
-            await self.record("config.reloaded", f"now running version {msg.version}")
+            mode = (await self.config.get()).get("strategy", {}).get("mode", "regime")
+            await self.record("config.reloaded",
+                             f"version {msg.version}, strategy={mode}")
 
     # --- results / drawdown tracking ----------------------------------
     async def _handle_results(self, q: asyncio.Queue) -> None:

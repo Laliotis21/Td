@@ -50,6 +50,85 @@ def ma_crossover_trend(ohlcv: np.ndarray, fast_ma: int, slow_ma: int,
     return sig
 
 
+def _wilder(x: np.ndarray, period: int) -> np.ndarray:
+    """Wilder smoothing (RMA) — χρησιμοποιείται στο ADX."""
+    out = np.full(x.size, np.nan, dtype=float)
+    if x.size < period:
+        return out
+    out[period - 1] = np.nanmean(x[:period])
+    for i in range(period, x.size):
+        out[i] = (out[i - 1] * (period - 1) + x[i]) / period
+    return out
+
+
+def adx(ohlcv: np.ndarray, period: int = 14) -> np.ndarray:
+    """
+    Average Directional Index (Wilder) — μέτρο **ισχύος τάσης**.
+    ADX >= ~25 -> trending· ADX < ~20 -> range/χωρίς τάση. Επιστρέφει array
+    μήκους N (leading NaN στο warm-up).
+    """
+    high, low, close = ohlcv[:, 1], ohlcv[:, 2], ohlcv[:, 3]
+    n = close.size
+    if n < 2 * period + 1:
+        return np.full(n, np.nan, dtype=float)
+    up = high[1:] - high[:-1]
+    dn = low[:-1] - low[1:]
+    plus_dm = np.where((up > dn) & (up > 0), up, 0.0)
+    minus_dm = np.where((dn > up) & (dn > 0), dn, 0.0)
+    prev_close = close[:-1]
+    tr = np.maximum.reduce([high[1:] - low[1:],
+                            np.abs(high[1:] - prev_close),
+                            np.abs(low[1:] - prev_close)])
+    atr = _wilder(tr, period)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        plus_di = 100 * _wilder(plus_dm, period) / atr
+        minus_di = 100 * _wilder(minus_dm, period) / atr
+        denom = plus_di + minus_di
+        dx = 100 * np.abs(plus_di - minus_di) / np.where(denom == 0, np.nan, denom)
+    adx_arr = _wilder(dx, period)
+    return np.concatenate([[np.nan], adx_arr])   # realign σε μήκος N
+
+
+def regime_switch(ohlcv: np.ndarray, fast_ma: int = 12, slow_ma: int = 26,
+                 trend_ma: int = 200, mr_lookback: int = 50, mr_z: float = 2.0,
+                 adx_period: int = 14, adx_threshold: float = 25.0) -> np.ndarray:
+    """
+    Regime-adaptive: ανά bar, αν ADX >= threshold (τάση) χρησιμοποιεί το
+    **trend-filtered crossover**· αλλιώς (range) χρησιμοποιεί **mean-reversion**.
+    Έτσι παίρνει την κατάλληλη στρατηγική για το εκάστοτε καθεστώς αγοράς.
+    """
+    a = adx(ohlcv, adx_period)
+    trend_sig = ma_crossover_trend(ohlcv, fast_ma, slow_ma, trend_ma)
+    mr_sig = mean_reversion(ohlcv, mr_lookback, mr_z)
+    sig = np.where(a >= adx_threshold, trend_sig, mr_sig)
+    sig[np.isnan(a)] = 0
+    return sig.astype(int)
+
+
+def build_signal(ohlcv: np.ndarray, s: dict) -> tuple[np.ndarray, int]:
+    """
+    Dispatcher: επιστρέφει (signal, max_hold) με βάση το `s["mode"]` από το config.
+    Επιτρέπει στον Orchestrator/Optimizer να αλλάζει στρατηγική **live** μέσω
+    hot-reload, χωρίς αλλαγή κώδικα.
+    """
+    mode = s.get("mode", "regime")
+    fast, slow = int(s.get("fast_ma", 12)), int(s.get("slow_ma", 26))
+    if mode == "crossover":
+        return ma_crossover(ohlcv, fast, slow), 0
+    if mode == "trend":
+        return ma_crossover_trend(ohlcv, fast, slow, int(s.get("trend_ma", 200))), 0
+    if mode == "mean_reversion":
+        return (mean_reversion(ohlcv, int(s.get("mr_lookback", 50)),
+                              float(s.get("mr_z", 2.0))),
+                int(s.get("mr_max_hold", 24)))
+    # default: regime switch
+    return (regime_switch(ohlcv, fast, slow, int(s.get("trend_ma", 200)),
+                         int(s.get("mr_lookback", 50)), float(s.get("mr_z", 2.0)),
+                         int(s.get("adx_period", 14)),
+                         float(s.get("adx_threshold", 25.0))),
+            int(s.get("mr_max_hold", 24)))
+
+
 def mean_reversion(ohlcv: np.ndarray, lookback: int = 50,
                   z_entry: float = 2.0) -> np.ndarray:
     """

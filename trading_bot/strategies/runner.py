@@ -225,6 +225,8 @@ def main() -> None:
                    help="fee rate ανά side (default 0.04%% Binance futures taker)")
     ap.add_argument("--leverage", type=float, default=None,
                    help="max leverage cap (notional<=lev*equity· default 1x = spot)")
+    ap.add_argument("--mode", default=None,
+                   help="crossover|trend|mean_reversion|regime (override config)")
     args = ap.parse_args()
 
     cfg = json.load(open(args.config, encoding="utf-8"))
@@ -244,11 +246,15 @@ def main() -> None:
 
     leverage = args.leverage if args.leverage is not None \
         else risk.get("max_leverage", 1.0)
-    report = run(
-        ohlcv, strat["fast_ma"], strat["slow_ma"], strat["atr_period"],
-        strat["atr_sl_mult"], risk["rr_ratio"], equity=equity,
-        risk_per_trade=risk["risk_per_trade"], fee_rate=args.fee,
-        max_leverage=leverage,
+    from .signals import build_signal
+    strat = dict(strat)
+    if args.mode:
+        strat["mode"] = args.mode
+    sig, max_hold = build_signal(ohlcv, strat)
+    report = simulate(
+        ohlcv, sig, strat["atr_period"], strat["atr_sl_mult"], risk["rr_ratio"],
+        equity=equity, risk_per_trade=risk["risk_per_trade"], fee_rate=args.fee,
+        max_leverage=leverage, max_hold=max_hold,
     )
     s = report.summary()
 
@@ -256,8 +262,9 @@ def main() -> None:
     print(" BACKTEST REPORT")
     print("=" * 58)
     print(f" Data source     : {source}")
-    print(f" Params          : fastMA={strat['fast_ma']} slowMA={strat['slow_ma']} "
-          f"ATR={strat['atr_period']} SLx{strat['atr_sl_mult']} RR={risk['rr_ratio']}")
+    print(f" Strategy        : {strat.get('mode', 'crossover')}  "
+          f"(fastMA={strat['fast_ma']} slowMA={strat['slow_ma']} "
+          f"ATR={strat['atr_period']} SLx{strat['atr_sl_mult']} RR={risk['rr_ratio']})")
     print(f" Risk/trade      : {risk['risk_per_trade']*100:.2f}%  | fee/side: {args.fee*100:.3f}%"
           f"  | max lev: {leverage:g}x")
     print("-" * 58)
