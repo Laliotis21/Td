@@ -95,34 +95,25 @@ class BacktestReport:
         }
 
 
-def run(ohlcv: np.ndarray, fast_ma: int, slow_ma: int, atr_period: int,
-       atr_sl_mult: float, rr_ratio: float, equity: float = 10000.0,
-       risk_per_trade: float = 0.01, fee_rate: float = 0.0004,
-       max_leverage: float = 1.0) -> BacktestReport:
+def simulate(ohlcv: np.ndarray, sig: np.ndarray, atr_period: int,
+            atr_sl_mult: float, rr_ratio: float, equity: float = 10000.0,
+            risk_per_trade: float = 0.01, fee_rate: float = 0.0004,
+            max_leverage: float = 1.0, max_hold: int = 0) -> BacktestReport:
     """
-    Bidirectional MA crossover με ATR stops, **ένα position τη φορά**:
-      cross-up  -> LONG  (stop κάτω, target πάνω)
-      cross-down-> SHORT (stop πάνω, target κάτω)
-    Κάθε trade ρισκάρει `risk_per_trade` του τρέχοντος equity· qty από
-    risk/stop-distance· fee = fee_rate*notional σε entry + exit. Όταν είμαστε σε
-    θέση δεν ανοίγουμε νέα — μπαίνουμε ξανά μόνο αφού κλείσει η προηγούμενη.
+    Κοινό execution engine για όλες τις στρατηγικές. Δέχεται έτοιμο per-bar σήμα
+    `sig` (+1 long / -1 short / 0). **Ένα position τη φορά**, με:
+      - ATR stop + RR target (bracket exit)
+      - leverage cap (notional <= max_leverage*equity) -> έλεγχος fees
+      - optional time-exit μετά από `max_hold` bars (χρήσιμο σε mean-reversion)
+      - 1% risk position sizing στο τρέχον equity (compounding)
     """
     report = BacktestReport(start_equity=equity, fee_rate=fee_rate)
-    if ohlcv.ndim != 2 or ohlcv.shape[0] < int(slow_ma) + 2:
+    if ohlcv.ndim != 2 or ohlcv.shape[0] < 3 or sig.size != ohlcv.shape[0]:
         return report
 
     high, low, close = ohlcv[:, 1], ohlcv[:, 2], ohlcv[:, 3]
-    fast = _sma(close, fast_ma)
-    slow = _sma(close, slow_ma)
     atr = _atr(high, low, close, atr_period)
     n = close.size
-
-    # signal ανά bar: +1 cross-up, -1 cross-down, 0 τίποτα
-    sig = np.zeros(n, dtype=int)
-    up = (fast[:-1] <= slow[:-1]) & (fast[1:] > slow[1:])
-    dn = (fast[:-1] >= slow[:-1]) & (fast[1:] < slow[1:])
-    sig[1:][up] = 1
-    sig[1:][dn] = -1
 
     cur_equity = equity
     pos: dict | None = None
@@ -140,6 +131,10 @@ def run(ohlcv: np.ndarray, fast_ma: int, slow_ma: int, atr_period: int,
                     exit_price = pos["stop"]
                 elif low[i] <= pos["target"]:
                     exit_price = pos["target"]
+            # time-exit: κλείσε στο close αν κρατήθηκε αρκετά
+            if exit_price is None and max_hold > 0 and \
+                    (i - pos["entry_idx"]) >= max_hold:
+                exit_price = float(close[i])
             if exit_price is not None:
                 report.trades.append(_close(pos, exit_price, i, fee_rate))
                 cur_equity += report.trades[-1].net_pnl
@@ -153,8 +148,7 @@ def run(ohlcv: np.ndarray, fast_ma: int, slow_ma: int, atr_period: int,
                 continue
             qty = (cur_equity * risk_per_trade) / stop_dist  # 1% risk sizing
             # leverage cap: notional <= max_leverage * equity (αποφυγή fee-bleed)
-            max_qty = (max_leverage * cur_equity) / entry
-            qty = min(qty, max_qty)
+            qty = min(qty, (max_leverage * cur_equity) / entry)
             if sig[i] == 1:                                   # LONG
                 stop, target = entry - stop_dist, entry + rr_ratio * stop_dist
                 side = "buy"
@@ -164,10 +158,20 @@ def run(ohlcv: np.ndarray, fast_ma: int, slow_ma: int, atr_period: int,
             pos = {"side": side, "entry": entry, "stop": stop, "target": target,
                    "qty": qty, "entry_idx": i}
 
-    # κλείσε τυχόν ανοιχτή θέση στο τελευταίο close (mark-to-market)
-    if pos is not None:
+    if pos is not None:  # mark-to-market τυχόν ανοιχτής θέσης
         report.trades.append(_close(pos, float(close[-1]), n - 1, fee_rate))
     return report
+
+
+def run(ohlcv: np.ndarray, fast_ma: int, slow_ma: int, atr_period: int,
+       atr_sl_mult: float, rr_ratio: float, equity: float = 10000.0,
+       risk_per_trade: float = 0.01, fee_rate: float = 0.0004,
+       max_leverage: float = 1.0) -> BacktestReport:
+    """Backward-compatible: bidirectional MA crossover πάνω στο κοινό simulate()."""
+    from .signals import ma_crossover
+    sig = ma_crossover(ohlcv, fast_ma, slow_ma)
+    return simulate(ohlcv, sig, atr_period, atr_sl_mult, rr_ratio, equity,
+                   risk_per_trade, fee_rate, max_leverage)
 
 
 def _close(pos: dict, exit_price: float, exit_idx: int, fee_rate: float) -> Trade:
