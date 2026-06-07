@@ -50,6 +50,38 @@ def ma_crossover_trend(ohlcv: np.ndarray, fast_ma: int, slow_ma: int,
     return sig
 
 
+def _roll_max_prior(x: np.ndarray, w: int) -> np.ndarray:
+    """Rolling max των ΠΡΟΗΓΟΥΜΕΝΩΝ w τιμών (όχι της τρέχουσας) — no look-ahead."""
+    out = np.full(x.size, np.nan, dtype=float)
+    for i in range(w, x.size):
+        out[i] = x[i - w:i].max()
+    return out
+
+
+def _roll_min_prior(x: np.ndarray, w: int) -> np.ndarray:
+    out = np.full(x.size, np.nan, dtype=float)
+    for i in range(w, x.size):
+        out[i] = x[i - w:i].min()
+    return out
+
+
+def donchian_breakout(ohlcv: np.ndarray, lookback: int = 20) -> np.ndarray:
+    """
+    Donchian channel breakout (Turtle-style trend-following):
+      +1 (LONG)  όταν close σπάει πάνω από το μέγιστο high των τελευταίων `lookback`
+      -1 (SHORT) όταν close σπάει κάτω από το ελάχιστο low των τελευταίων `lookback`
+    Χωρίς look-ahead (το κανάλι υπολογίζεται από προηγούμενες μπάρες).
+    """
+    high, low, close = ohlcv[:, 1], ohlcv[:, 2], ohlcv[:, 3]
+    upper = _roll_max_prior(high, lookback)
+    lower = _roll_min_prior(low, lookback)
+    sig = np.zeros(close.size, dtype=int)
+    sig[close > upper] = 1
+    sig[close < lower] = -1
+    sig[np.isnan(upper)] = 0
+    return sig
+
+
 def _wilder(x: np.ndarray, period: int) -> np.ndarray:
     """Wilder smoothing (RMA) — χρησιμοποιείται στο ADX."""
     out = np.full(x.size, np.nan, dtype=float)
@@ -91,14 +123,21 @@ def adx(ohlcv: np.ndarray, period: int = 14) -> np.ndarray:
 
 def regime_switch(ohlcv: np.ndarray, fast_ma: int = 12, slow_ma: int = 26,
                  trend_ma: int = 200, mr_lookback: int = 50, mr_z: float = 2.0,
-                 adx_period: int = 14, adx_threshold: float = 25.0) -> np.ndarray:
+                 adx_period: int = 14, adx_threshold: float = 25.0,
+                 trend_kind: str = "crossover", donchian_lb: int = 20) -> np.ndarray:
     """
-    Regime-adaptive: ανά bar, αν ADX >= threshold (τάση) χρησιμοποιεί το
-    **trend-filtered crossover**· αλλιώς (range) χρησιμοποιεί **mean-reversion**.
-    Έτσι παίρνει την κατάλληλη στρατηγική για το εκάστοτε καθεστώς αγοράς.
+    Regime-adaptive: ανά bar, αν ADX >= threshold (τάση) χρησιμοποιεί το trend
+    σκέλος· αλλιώς (range) χρησιμοποιεί **mean-reversion**.
+
+    `trend_kind`:
+      "crossover" -> trend-filtered MA crossover (default)
+      "donchian"  -> Donchian breakout (Turtle-style)
     """
     a = adx(ohlcv, adx_period)
-    trend_sig = ma_crossover_trend(ohlcv, fast_ma, slow_ma, trend_ma)
+    if trend_kind == "donchian":
+        trend_sig = donchian_breakout(ohlcv, donchian_lb)
+    else:
+        trend_sig = ma_crossover_trend(ohlcv, fast_ma, slow_ma, trend_ma)
     mr_sig = mean_reversion(ohlcv, mr_lookback, mr_z)
     sig = np.where(a >= adx_threshold, trend_sig, mr_sig)
     sig[np.isnan(a)] = 0
@@ -113,20 +152,24 @@ def build_signal(ohlcv: np.ndarray, s: dict) -> tuple[np.ndarray, int]:
     """
     mode = s.get("mode", "regime")
     fast, slow = int(s.get("fast_ma", 12)), int(s.get("slow_ma", 26))
+    hold = int(s.get("mr_max_hold", 24))
     if mode == "crossover":
         return ma_crossover(ohlcv, fast, slow), 0
     if mode == "trend":
         return ma_crossover_trend(ohlcv, fast, slow, int(s.get("trend_ma", 200))), 0
+    if mode == "donchian":
+        return donchian_breakout(ohlcv, int(s.get("donchian_lb", 20))), 0
     if mode == "mean_reversion":
         return (mean_reversion(ohlcv, int(s.get("mr_lookback", 50)),
-                              float(s.get("mr_z", 2.0))),
-                int(s.get("mr_max_hold", 24)))
-    # default: regime switch
+                              float(s.get("mr_z", 2.0))), hold)
+    # regime ("regime" -> crossover trend leg, "regime_donchian" -> donchian leg)
+    trend_kind = "donchian" if mode == "regime_donchian" else "crossover"
     return (regime_switch(ohlcv, fast, slow, int(s.get("trend_ma", 200)),
                          int(s.get("mr_lookback", 50)), float(s.get("mr_z", 2.0)),
                          int(s.get("adx_period", 14)),
-                         float(s.get("adx_threshold", 25.0))),
-            int(s.get("mr_max_hold", 24)))
+                         float(s.get("adx_threshold", 25.0)),
+                         trend_kind, int(s.get("donchian_lb", 20))),
+            hold)
 
 
 def mean_reversion(ohlcv: np.ndarray, lookback: int = 50,

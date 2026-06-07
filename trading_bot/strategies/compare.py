@@ -45,6 +45,15 @@ def _run_strategies(ohlcv: np.ndarray) -> dict[str, dict]:
     sig = signals.regime_switch(ohlcv, 12, 26, 200, 50, 2.0, 14, 25.0)
     out["regime_switch"] = runner.simulate(ohlcv, sig, ATR, 2.0, 1.5, EQUITY,
                                            RISK, FEE, LEV, max_hold=24).summary()
+
+    sig = signals.donchian_breakout(ohlcv, 20)            # standalone trend leg
+    out["donchian"] = runner.simulate(ohlcv, sig, ATR, 1.5, 2.5, EQUITY,
+                                      RISK, FEE, LEV).summary()
+
+    sig = signals.regime_switch(ohlcv, 12, 26, 200, 50, 2.0, 14, 25.0,
+                               trend_kind="donchian", donchian_lb=20)
+    out["regime_donchian"] = runner.simulate(ohlcv, sig, ATR, 2.0, 1.5, EQUITY,
+                                            RISK, FEE, LEV, max_hold=24).summary()
     return out
 
 
@@ -64,8 +73,9 @@ def main() -> None:
     args = ap.parse_args()
 
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
-    agg: dict[str, list[float]] = {"crossover": [], "trend_filtered": [],
-                                   "mean_reversion": [], "regime_switch": []}
+    agg: dict[str, list[float]] = {k: [] for k in
+                                   ("crossover", "trend_filtered", "mean_reversion",
+                                    "regime_switch", "donchian", "regime_donchian")}
 
     print(f"Period {args.start} -> {args.end} @ {args.interval} "
           f"| fee {FEE*100:.3f}%/side | lev {LEV:g}x | equity ${EQUITY:.0f}\n")
