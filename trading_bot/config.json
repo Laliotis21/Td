@@ -7,6 +7,11 @@
     "max_daily_drawdown": 0.06,
     "account_equity": 10000.0
   },
+  "costs": {
+    "fee_rate": 0.0004,
+    "spread_bps": 2.0,
+    "min_fee": 0.0
+  },
   "strategy": {
     "mode": "donchian",
     "fast_ma": 12,

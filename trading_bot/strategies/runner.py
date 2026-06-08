@@ -234,8 +234,13 @@ def main() -> None:
     ap.add_argument("--config", default="config.json")
     ap.add_argument("--equity", type=float, default=None,
                    help="override start equity (αλλιώς από config)")
-    ap.add_argument("--fee", type=float, default=0.0004,
-                   help="fee rate ανά side (default 0.04%% Binance futures taker)")
+    ap.add_argument("--fee", type=float, default=None,
+                   help="fee rate ανά side (default: config costs ή 0.04%%)")
+    ap.add_argument("--spread-bps", type=float, default=None,
+                   help="slippage ανά side σε bps (default: config costs ή 0)")
+    ap.add_argument("--min-fee", type=float, default=None,
+                   help="ελάχιστη προμήθεια ανά side — τιμωρεί μικρά κεφάλαια "
+                        "(default: config costs ή 0)")
     ap.add_argument("--leverage", type=float, default=None,
                    help="max leverage cap (notional<=lev*equity· default 1x = spot)")
     ap.add_argument("--mode", default=None,
@@ -244,7 +249,13 @@ def main() -> None:
 
     cfg = json.load(open(args.config, encoding="utf-8"))
     strat, risk = cfg["strategy"], cfg["risk"]
+    costs = cfg.get("costs", {})
     equity = args.equity if args.equity is not None else risk["account_equity"]
+    fee = args.fee if args.fee is not None else float(costs.get("fee_rate", 0.0004))
+    spread = args.spread_bps if args.spread_bps is not None \
+        else float(costs.get("spread_bps", 0.0))
+    min_fee = args.min_fee if args.min_fee is not None \
+        else float(costs.get("min_fee", 0.0))
 
     if args.live:
         from .data_feed import fetch
@@ -266,8 +277,8 @@ def main() -> None:
     sig, max_hold = build_signal(ohlcv, strat)
     report = simulate(
         ohlcv, sig, strat["atr_period"], strat["atr_sl_mult"], risk["rr_ratio"],
-        equity=equity, risk_per_trade=risk["risk_per_trade"], fee_rate=args.fee,
-        max_leverage=leverage, max_hold=max_hold,
+        equity=equity, risk_per_trade=risk["risk_per_trade"], fee_rate=fee,
+        max_leverage=leverage, max_hold=max_hold, spread_bps=spread, min_fee=min_fee,
     )
     s = report.summary()
 
@@ -278,8 +289,8 @@ def main() -> None:
     print(f" Strategy        : {strat.get('mode', 'crossover')}  "
           f"(fastMA={strat['fast_ma']} slowMA={strat['slow_ma']} "
           f"ATR={strat['atr_period']} SLx{strat['atr_sl_mult']} RR={risk['rr_ratio']})")
-    print(f" Risk/trade      : {risk['risk_per_trade']*100:.2f}%  | fee/side: {args.fee*100:.3f}%"
-          f"  | max lev: {leverage:g}x")
+    print(f" Risk/trade      : {risk['risk_per_trade']*100:.2f}%  | fee/side: {fee*100:.3f}%"
+          f"  | slip: {spread:g}bps | min-fee: {min_fee:g} | max lev: {leverage:g}x")
     print("-" * 58)
     print(f" Trades          : {s['n_trades']}  (wins {s['wins']} / losses {s['losses']})")
     print(f" Win rate        : {s['win_rate']*100:.1f}%")

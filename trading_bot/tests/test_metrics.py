@@ -88,6 +88,19 @@ def test_net_score_finite_and_fee_aware() -> None:
         assert k in s
 
 
+def test_min_fee_reduces_pnl() -> None:
+    from strategies import objective as obj
+    ohlcv = synthetic_ohlcv(400)
+    base = {"mode": "donchian", "atr_period": 14, "donchian_lb": 20}
+    free = obj.simulate_summary([20, 1.5, 2.0], ohlcv, "donchian", base, 14,
+                               equity=100.0)
+    costly = obj.simulate_summary([20, 1.5, 2.0], ohlcv, "donchian", base, 14,
+                                 equity=100.0, min_fee=0.5)
+    assert costly["total_fees"] >= free["total_fees"]      # min-fee αυξάνει κόστος
+    if free["n_trades"] > 0:
+        assert costly["net_pnl"] < free["net_pnl"]         # ... άρα μειώνει το PnL
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

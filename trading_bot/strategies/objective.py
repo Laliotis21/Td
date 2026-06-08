@@ -105,8 +105,11 @@ def decode_mode(x: np.ndarray, mode: str) -> dict[str, float]:
 def simulate_summary(x: np.ndarray, ohlcv: np.ndarray, mode: str,
                     base_strat: dict, atr_period: int = 14,
                     equity: float = 10000.0, risk: float = 0.01,
-                    fee: float = 0.0004, lev: float = 1.0) -> dict:
-    """Fee-aware backtest της στρατηγικής `mode` με params x -> summary dict."""
+                    fee: float = 0.0004, lev: float = 1.0,
+                    spread: float = 0.0, min_fee: float = 0.0) -> dict:
+    """Fee-aware backtest της στρατηγικής `mode` με params x -> summary dict.
+    `spread` (bps slippage/side) + `min_fee` (ελάχιστη προμήθεια/side) κάνουν το
+    score ρεαλιστικό και σε μικρά κεφάλαια."""
     from . import runner
     from .signals import build_signal
     p = decode_mode(x, mode)
@@ -115,14 +118,16 @@ def simulate_summary(x: np.ndarray, ohlcv: np.ndarray, mode: str,
     return runner.simulate(
         ohlcv, sig, atr_period, float(p["atr_sl_mult"]), float(p["rr_ratio"]),
         equity=equity, risk_per_trade=risk, fee_rate=fee, max_leverage=lev,
-        max_hold=max_hold).summary()
+        max_hold=max_hold, spread_bps=spread, min_fee=min_fee).summary()
 
 
 def net_score(x: np.ndarray, ohlcv: np.ndarray, mode: str, base_strat: dict,
              atr_period: int = 14, equity: float = 10000.0, risk: float = 0.01,
-             fee: float = 0.0004, lev: float = 1.0, dd_penalty: float = 0.5) -> float:
+             fee: float = 0.0004, lev: float = 1.0, spread: float = 0.0,
+             min_fee: float = 0.0, dd_penalty: float = 0.5) -> float:
     """Score (higher=better): net return% − dd_penalty·maxDD%, ποινή για λίγα trades."""
-    s = simulate_summary(x, ohlcv, mode, base_strat, atr_period, equity, risk, fee, lev)
+    s = simulate_summary(x, ohlcv, mode, base_strat, atr_period, equity, risk, fee,
+                        lev, spread, min_fee)
     if s["n_trades"] < 5:
         return -1e3
     return float(s["return_pct"] - dd_penalty * s["max_drawdown_pct"])
@@ -130,6 +135,8 @@ def net_score(x: np.ndarray, ohlcv: np.ndarray, mode: str, base_strat: dict,
 
 def net_cost(x: np.ndarray, ohlcv: np.ndarray, mode: str, base_strat: dict,
             atr_period: int = 14, equity: float = 10000.0, risk: float = 0.01,
-            fee: float = 0.0004, lev: float = 1.0) -> float:
+            fee: float = 0.0004, lev: float = 1.0, spread: float = 0.0,
+            min_fee: float = 0.0) -> float:
     """Κόστος προς ελαχιστοποίηση (= −net_score) για scipy optimizers."""
-    return -net_score(x, ohlcv, mode, base_strat, atr_period, equity, risk, fee, lev)
+    return -net_score(x, ohlcv, mode, base_strat, atr_period, equity, risk, fee,
+                     lev, spread, min_fee)

@@ -102,19 +102,22 @@ class OptimizationAgent(BaseAgent):
     # ===================================================================
     def _optimize_walk_forward(self, ohlcv: np.ndarray, mode: str,
                               base_strat: dict, atr_period: int, equity: float,
-                              risk: float, fee: float, lev: float
+                              risk: float, fee: float, lev: float,
+                              spread: float = 0.0, min_fee: float = 0.0
                               ) -> tuple[dict, dict, dict]:
         """
         Walk-forward + fee-aware optimization της **τρέχουσας** στρατηγικής.
         Optimizeάρει σε TRAIN (πρώτο 70%) και επικυρώνει σε αόρατο TEST (30%),
-        ώστε να μη γίνεται overfit. Blocking — μέσα σε asyncio.to_thread.
+        ώστε να μη γίνεται overfit. Λαμβάνει υπόψη spread+min_fee (ρεαλιστικά
+        κόστη). Blocking — μέσα σε asyncio.to_thread.
         Επιστρέφει (params, train_summary, test_summary).
         """
         n = int(ohlcv.shape[0])
         cut = max(int(n * 0.7), 1)
         train, test = ohlcv[:cut], ohlcv[cut:]
         bounds = objective.param_bounds(mode)
-        args = (train, mode, base_strat, atr_period, equity, risk, fee, lev)
+        args = (train, mode, base_strat, atr_period, equity, risk, fee, lev,
+                spread, min_fee)
         # global search (GA-like) πάνω στο fee-aware net-return objective
         result = differential_evolution(
             objective.net_cost, bounds=bounds, args=args,
@@ -128,9 +131,11 @@ class OptimizationAgent(BaseAgent):
         best_x = refined.x if refined.fun <= result.fun else result.x
         params = objective.decode_mode(np.asarray(best_x), mode)
         train_sum = objective.simulate_summary(
-            best_x, train, mode, base_strat, atr_period, equity, risk, fee, lev)
+            best_x, train, mode, base_strat, atr_period, equity, risk, fee, lev,
+            spread, min_fee)
         test_sum = objective.simulate_summary(
-            best_x, test, mode, base_strat, atr_period, equity, risk, fee, lev)
+            best_x, test, mode, base_strat, atr_period, equity, risk, fee, lev,
+            spread, min_fee)
         return params, train_sum, test_sum
 
     # ===================================================================
@@ -192,7 +197,10 @@ class OptimizationAgent(BaseAgent):
         equity = float(risk_cfg.get("account_equity", 10000.0))
         risk = float(risk_cfg.get("risk_per_trade", 0.01))
         lev = float(risk_cfg.get("max_leverage", 1.0))
-        fee = float(os.getenv("OPTIMIZE_FEE", "0.0004"))
+        costs = cfg.get("costs", {})
+        fee = float(costs.get("fee_rate", os.getenv("OPTIMIZE_FEE", "0.0004")))
+        spread = float(costs.get("spread_bps", 0.0))
+        min_fee = float(costs.get("min_fee", 0.0))
 
         # 1. ingest πραγματικά δεδομένα (live timeframe)
         ohlcv = await self._load_ohlcv()
@@ -201,7 +209,7 @@ class OptimizationAgent(BaseAgent):
         # 3. walk-forward + fee-aware optimization της ΣΩΣΤΗΣ στρατηγικής (-> thread)
         params, train_sum, test_sum = await asyncio.to_thread(
             self._optimize_walk_forward, ohlcv, mode, strat_cfg, atr_period,
-            equity, risk, fee, lev)
+            equity, risk, fee, lev, spread, min_fee)
         # 4. prompt tuning
         new_prompt, lessons = await self._tune_prompt(
             cfg.get("llm", {}).get("system_prompt", ""))
