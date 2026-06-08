@@ -66,6 +66,9 @@ def build_bot(mode: str, risk_per_trade: float = 0.01, min_rr: float = 3.0,
     elif mode == "stocks":
         from execution.stocks_ib import StocksExecution
         execution = StocksExecution(**execution_kwargs)
+    elif mode in ("sim", "paper"):
+        from execution.simulated import SimulatedExecution
+        execution = SimulatedExecution(**execution_kwargs)
     else:
-        raise ValueError(f"Άγνωστο mode '{mode}' — επίλεξε 'crypto' ή 'stocks'")
+        raise ValueError(f"Άγνωστο mode '{mode}' — επίλεξε 'crypto' | 'stocks' | 'sim'")
     return TradingBot(execution, risk)
