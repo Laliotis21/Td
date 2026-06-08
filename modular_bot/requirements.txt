@@ -1,0 +1,5 @@
+# Crypto execution
+ccxt>=4.2
+
+# Stocks execution (Interactive Brokers)
+ib_insync>=0.9.86
