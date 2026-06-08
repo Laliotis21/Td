@@ -70,6 +70,24 @@ def test_bounds_shape() -> None:
     assert len(PARAM_BOUNDS) == 4
 
 
+def test_param_bounds_per_mode() -> None:
+    from strategies import objective as obj
+    assert len(obj.param_bounds("donchian")) == 3          # lb, SLx, rr
+    assert len(obj.param_bounds("crossover")) == 4         # fast, slow, SLx, rr
+    assert len(obj.param_bounds("mean_reversion")) == 4    # lookback, z, SLx, rr
+
+
+def test_net_score_finite_and_fee_aware() -> None:
+    from strategies import objective as obj
+    ohlcv = synthetic_ohlcv(400)
+    base = {"mode": "donchian", "atr_period": 14, "donchian_lb": 20}
+    val = obj.net_score([20, 1.5, 2.0], ohlcv, "donchian", base, 14)  # lb,SLx,rr
+    assert np.isfinite(val)
+    s = obj.simulate_summary([20, 1.5, 2.0], ohlcv, "donchian", base, 14)
+    for k in ("n_trades", "net_pnl", "return_pct", "max_drawdown_pct"):
+        assert k in s
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

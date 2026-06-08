@@ -4,13 +4,14 @@ OptimizationAgent — ο μηχανισμός Συνεχούς Επανεκπα�
 Τρέχει περιοδικά (κάθε OPTIMIZE_EVERY_HOURS) ή μετά από OPTIMIZE_EVERY_TRADES
 κλεισμένα trades. Σε κάθε γύρο:
 
-  1. DATA INGESTION   : διαβάζει closed trades (SQLite) + OHLCV (Binance, ή
-                        synthetic σε dry-run) μέσω asyncio.to_thread.
+  1. DATA INGESTION   : closed trades (SQLite) + ΠΡΑΓΜΑΤΙΚΑ OHLCV (public
+                        Coinbase/CryptoCompare, στο live timeframe) μέσω to_thread.
   2. EVALUATION       : υπολογίζει Sharpe / Win Rate / Profit Factor / Max DD
                         ανά στρατηγική (strategies/metrics.py).
-  3. QUANT OPTIMIZATION: scipy.optimize.differential_evolution (GA-like global
-                        search) + local refine με `minimize` πάνω στο objective.
-                        Προαιρετικό rolling-window sklearn μοντέλο για δυναμικό R:R.
+  3. QUANT OPTIMIZATION: walk-forward (train/test split) + fee-aware objective
+                        (net return μετά fees) πάνω στη ΣΩΣΤΗ στρατηγική (config
+                        mode), με scipy differential_evolution + Nelder-Mead. Τα
+                        νέα params γίνονται deploy ΜΟΝΟ αν περάσουν out-of-sample.
   4. LLM PROMPT-TUNING : μαζεύει αποτυχημένες Polymarket προβλέψεις, παράγει
                         "lessons learned", και ζητά από τον Claude βελτιωμένο
                         system prompt (few-shot από τα ίδια τα λάθη).
@@ -26,6 +27,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 from scipy.optimize import differential_evolution, minimize
@@ -55,24 +57,32 @@ class OptimizationAgent(BaseAgent):
     # ===================================================================
     # 1. DATA INGESTION
     # ===================================================================
-    async def _load_ohlcv(self, symbol: str = "BTCUSDT") -> np.ndarray:
-        """OHLCV από Binance (live) ή synthetic (dry-run / χωρίς keys)."""
-        if os.getenv("DRY_RUN", "true").lower() == "true" \
-                or not os.getenv("BINANCE_API_KEY"):
-            return synthetic_ohlcv(500)
+    async def _load_ohlcv(self, symbol: str | None = None) -> np.ndarray:
+        """
+        Πραγματικά OHLCV από public πηγή (Coinbase/CryptoCompare — δεν είναι
+        geo-blocked, σε αντίθεση με το Binance που δίνει 451 εδώ), στο ΙΔΙΟ
+        timeframe που κάνει trade ο bot (LIVE_INTERVAL). Fallback σε synthetic
+        μόνο αν αποτύχει το δίκτυο, ώστε ο optimizer να μη μένει ποτέ.
+        """
+        symbol = symbol or os.getenv("OPTIMIZE_SYMBOL", "BTC-USD")
+        interval = os.getenv("LIVE_INTERVAL", "1d")
+        lookback_days = {"1m": 5, "5m": 20, "15m": 40, "1h": 120,
+                         "6h": 400, "1d": 900}.get(interval, 365)
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=lookback_days)
         try:
-            from binance.client import Client
-            client = Client(os.getenv("BINANCE_API_KEY"),
-                           os.getenv("BINANCE_API_SECRET"),
-                           testnet=os.getenv("BINANCE_TESTNET", "true").lower() == "true")
-            raw = await asyncio.to_thread(
-                client.get_klines, symbol=symbol, interval="1h", limit=500)
-            arr = np.array([[float(k[1]), float(k[2]), float(k[3]),
-                             float(k[4]), float(k[5])] for k in raw])
-            return arr
+            from strategies.data_feed import fetch
+            arr, source = await asyncio.to_thread(
+                fetch, symbol, start.strftime("%Y-%m-%d"),
+                end.strftime("%Y-%m-%d"), interval)
+            if arr.shape[0] >= 60:
+                self.log.info("optimizer ingested REAL data: %s", source)
+                return arr
+            self.log.warning("real OHLCV too short (%d bars); synthetic fallback",
+                            arr.shape[0])
         except Exception as exc:  # noqa: BLE001
-            self.log.warning("OHLCV fetch failed (%s); using synthetic", exc)
-            return synthetic_ohlcv(500)
+            self.log.warning("real OHLCV fetch failed (%s); synthetic fallback", exc)
+        return synthetic_ohlcv(500)
 
     # ===================================================================
     # 2. EVALUATION
@@ -90,55 +100,38 @@ class OptimizationAgent(BaseAgent):
     # ===================================================================
     # 3. QUANT OPTIMIZATION (scipy)
     # ===================================================================
-    def _optimize_sync(self, ohlcv: np.ndarray,
-                      atr_period: int) -> tuple[dict, float]:
-        """Blocking optimization — καλείται μέσα σε asyncio.to_thread."""
-        # global search (GA-like)
+    def _optimize_walk_forward(self, ohlcv: np.ndarray, mode: str,
+                              base_strat: dict, atr_period: int, equity: float,
+                              risk: float, fee: float, lev: float
+                              ) -> tuple[dict, dict, dict]:
+        """
+        Walk-forward + fee-aware optimization της **τρέχουσας** στρατηγικής.
+        Optimizeάρει σε TRAIN (πρώτο 70%) και επικυρώνει σε αόρατο TEST (30%),
+        ώστε να μη γίνεται overfit. Blocking — μέσα σε asyncio.to_thread.
+        Επιστρέφει (params, train_summary, test_summary).
+        """
+        n = int(ohlcv.shape[0])
+        cut = max(int(n * 0.7), 1)
+        train, test = ohlcv[:cut], ohlcv[cut:]
+        bounds = objective.param_bounds(mode)
+        args = (train, mode, base_strat, atr_period, equity, risk, fee, lev)
+        # global search (GA-like) πάνω στο fee-aware net-return objective
         result = differential_evolution(
-            objective.objective, bounds=objective.PARAM_BOUNDS,
-            args=(ohlcv, atr_period), maxiter=40, popsize=12, tol=1e-3,
-            seed=42, polish=False,
+            objective.net_cost, bounds=bounds, args=args,
+            maxiter=40, popsize=12, tol=1e-3, seed=42, polish=False,
         )
         # local refine γύρω από το global optimum
         refined = minimize(
-            objective.objective, result.x, args=(ohlcv, atr_period),
-            method="Nelder-Mead",
+            objective.net_cost, result.x, args=args, method="Nelder-Mead",
             options={"maxiter": 200, "xatol": 1e-2, "fatol": 1e-3},
         )
         best_x = refined.x if refined.fun <= result.fun else result.x
-        best_score = -float(min(refined.fun, result.fun))
-        return objective.decode(np.asarray(best_x)), best_score
-
-    def _rolling_rr_model(self, ohlcv: np.ndarray) -> float | None:
-        """
-        Προαιρετικό rolling-window sklearn μοντέλο: μαθαίνει σχέση
-        volatility -> βέλτιστο R:R και προτείνει δυναμικό rr. Επιστρέφει None
-        αν δεν υπάρχουν αρκετά δεδομένα ή λείπει το sklearn.
-        """
-        try:
-            from sklearn.ensemble import GradientBoostingRegressor
-        except ImportError:
-            return None
-        close = ohlcv[:, 3]
-        if close.size < 60:
-            return None
-        # feature: rolling volatility· target: forward return magnitude (proxy R:R)
-        rets = np.diff(np.log(close))
-        win = 20
-        X, y = [], []
-        for i in range(win, rets.size - 1):
-            vol = rets[i - win:i].std()
-            fwd = abs(rets[i + 1])
-            X.append([vol])
-            y.append(fwd)
-        if len(X) < 30:
-            return None
-        model = GradientBoostingRegressor(n_estimators=50, max_depth=2)
-        model.fit(np.array(X), np.array(y))
-        cur_vol = rets[-win:].std()
-        pred = float(model.predict([[cur_vol]])[0])
-        # map σε εύλογο R:R εύρος [1.0, 4.0]
-        return float(np.clip(1.0 + pred * 100.0, 1.0, 4.0))
+        params = objective.decode_mode(np.asarray(best_x), mode)
+        train_sum = objective.simulate_summary(
+            best_x, train, mode, base_strat, atr_period, equity, risk, fee, lev)
+        test_sum = objective.simulate_summary(
+            best_x, test, mode, base_strat, atr_period, equity, risk, fee, lev)
+        return params, train_sum, test_sum
 
     # ===================================================================
     # 4. LLM PROMPT-TUNING (Claude)
@@ -190,47 +183,61 @@ class OptimizationAgent(BaseAgent):
     # 5. ONE FULL RETRAINING ROUND
     # ===================================================================
     async def optimize_once(self) -> int:
-        await self.record("retrain.start", "beginning optimization round")
+        await self.record("retrain.start", "beginning walk-forward optimization round")
         cfg = await self.config.get()
-        atr_period = int(cfg.get("strategy", {}).get("atr_period", 14))
+        strat_cfg = cfg.get("strategy", {})
+        risk_cfg = cfg.get("risk", {})
+        mode = strat_cfg.get("mode", "regime")
+        atr_period = int(strat_cfg.get("atr_period", 14))
+        equity = float(risk_cfg.get("account_equity", 10000.0))
+        risk = float(risk_cfg.get("risk_per_trade", 0.01))
+        lev = float(risk_cfg.get("max_leverage", 1.0))
+        fee = float(os.getenv("OPTIMIZE_FEE", "0.0004"))
 
-        # 1. ingest
+        # 1. ingest πραγματικά δεδομένα (live timeframe)
         ohlcv = await self._load_ohlcv()
         # 2. evaluate live performance (για το journal/audit)
         live_metrics = await self._evaluate_live()
-        # 3. quant optimization (CPU-bound -> thread)
-        best_params, best_score = await asyncio.to_thread(
-            self._optimize_sync, ohlcv, atr_period)
-        dyn_rr = await asyncio.to_thread(self._rolling_rr_model, ohlcv)
-        if dyn_rr is not None:
-            best_params["rr_ratio"] = dyn_rr
+        # 3. walk-forward + fee-aware optimization της ΣΩΣΤΗΣ στρατηγικής (-> thread)
+        params, train_sum, test_sum = await asyncio.to_thread(
+            self._optimize_walk_forward, ohlcv, mode, strat_cfg, atr_period,
+            equity, risk, fee, lev)
         # 4. prompt tuning
         new_prompt, lessons = await self._tune_prompt(
             cfg.get("llm", {}).get("system_prompt", ""))
 
-        # συνθέτω νέο config
+        # 5. OOS gate: ΜΗΝ κάνεις deploy params που δεν γενικεύουν (anti-overfit)
+        if test_sum["n_trades"] < 5 or test_sum["return_pct"] <= 0.0:
+            await self.record(
+                "retrain.rejected",
+                f"OOS μη κερδοφόρο (test {test_sum['return_pct']:+.2f}% / "
+                f"{int(test_sum['n_trades'])} trades, train "
+                f"{train_sum['return_pct']:+.2f}%) — κρατώ v{self.config.version}",
+                {"mode": mode, "params": params, "train": train_sum, "test": test_sum},
+            )
+            return self.config.version
+
+        # 6. deploy: γράψε τα params στα ΣΩΣΤΑ κλειδιά της τρέχουσας στρατηγικής
         new_cfg = dict(cfg)
-        new_cfg["strategy"] = {
-            **cfg.get("strategy", {}),
-            "fast_ma": best_params["fast_ma"],
-            "slow_ma": best_params["slow_ma"],
-            "atr_sl_mult": best_params["atr_sl_mult"],
-        }
-        new_cfg["risk"] = {**cfg.get("risk", {}), "rr_ratio": best_params["rr_ratio"]}
+        new_cfg["strategy"] = {**strat_cfg,
+                               **{k: v for k, v in params.items() if k != "rr_ratio"}}
+        new_cfg["risk"] = {**risk_cfg, "rr_ratio": params["rr_ratio"]}
         new_cfg["llm"] = {
             **cfg.get("llm", {}),
             "system_prompt": new_prompt,
             "few_shot_lessons": lessons,
         }
 
-        # 5. deploy + hot-reload
+        # 7. deploy + hot-reload
         version = await self.config.save(new_cfg)
-        await self.db.insert_params(version, best_params, best_score,
-                                   {"live": live_metrics, "dynamic_rr": dyn_rr})
+        await self.db.insert_params(
+            version, params, test_sum["return_pct"],
+            {"mode": mode, "train": train_sum, "test": test_sum, "live": live_metrics})
         await self.record(
             "retrain.deployed",
-            f"v{version} score={best_score:.3f} params={best_params}",
-            {"live_metrics": live_metrics, "lessons": len(lessons)},
+            f"v{version} mode={mode} OOS={test_sum['return_pct']:+.2f}% "
+            f"(train {train_sum['return_pct']:+.2f}%) params={params}",
+            {"train": train_sum, "test": test_sum, "lessons": len(lessons)},
         )
         self.bus.publish(TOPIC_CONFIG_RELOAD, ConfigReload(version=version))
         return version
