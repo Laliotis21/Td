@@ -1,9 +1,9 @@
 {
-  "version": 1,
+  "version": 3,
   "risk": {
     "risk_per_trade": 0.01,
     "max_open_positions": 5,
-    "rr_ratio": 1.0,
+    "rr_ratio": 2.0,
     "max_daily_drawdown": 0.06,
     "account_equity": 10000.0
   },
@@ -13,7 +13,7 @@
     "min_fee": 0.0
   },
   "exit": {
-    "mode": "adaptive",
+    "mode": "bracket",
     "trail_atr": 3.0,
     "adx_threshold": 25.0
   },
