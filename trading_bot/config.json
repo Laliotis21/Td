@@ -12,6 +12,11 @@
     "spread_bps": 2.0,
     "min_fee": 0.0
   },
+  "exit": {
+    "mode": "adaptive",
+    "trail_atr": 3.0,
+    "adx_threshold": 25.0
+  },
   "strategy": {
     "mode": "donchian",
     "fast_ma": 12,

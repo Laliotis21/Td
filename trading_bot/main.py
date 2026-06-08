@@ -47,7 +47,7 @@ async def main() -> None:
         PolymarketAgent(bus, db, journal, config),
         LiveTraderAgent(bus, db, journal, config),
         ExecutionAgent(bus, db, journal),
-        PositionManagerAgent(bus, db, journal),
+        PositionManagerAgent(bus, db, journal, config),
         Orchestrator(bus, db, journal, config),
         OptimizationAgent(bus, db, journal, config),
     ]

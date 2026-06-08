@@ -99,11 +99,18 @@ def simulate(ohlcv: np.ndarray, sig: np.ndarray, atr_period: int,
             atr_sl_mult: float, rr_ratio: float, equity: float = 10000.0,
             risk_per_trade: float = 0.01, fee_rate: float = 0.0004,
             max_leverage: float = 1.0, max_hold: int = 0,
-            spread_bps: float = 0.0, min_fee: float = 0.0) -> BacktestReport:
+            spread_bps: float = 0.0, min_fee: float = 0.0,
+            trail_atr: float = 0.0, adx_period: int = 14,
+            adx_thr: float = 0.0) -> BacktestReport:
     """
     Κοινό execution engine για όλες τις στρατηγικές. Δέχεται έτοιμο per-bar σήμα
     `sig` (+1 long / -1 short / 0). **Ένα position τη φορά**, με:
-      - ATR stop + RR target (bracket exit)
+      - ATR stop + RR target (bracket exit)· ή, αν `trail_atr`>0, **trailing stop**
+        (ride-the-trend: μένει μέσα όσο πάει υπέρ σου, βγαίνει όταν γυρίσει
+        trail_atr×ATR από το ακραίο — χωρίς σταθερό take-profit)
+      - **ADAPTIVE exit** (αν `trail_atr`>0 ΚΑΙ `adx_thr`>0): ανά trade, αν στην
+        είσοδο ADX>=adx_thr (τάση) -> trailing (ride)· αλλιώς (πλάγια) -> fixed RR
+        target (γρήγορο κέρδος, υψηλό win rate). Ο bot «διαλέγει μόνος του».
       - leverage cap (notional <= max_leverage*equity) -> έλεγχος fees
       - optional time-exit μετά από `max_hold` bars (χρήσιμο σε mean-reversion)
       - 1% risk position sizing στο τρέχον equity (compounding)
@@ -117,6 +124,11 @@ def simulate(ohlcv: np.ndarray, sig: np.ndarray, atr_period: int,
     high, low, close = ohlcv[:, 1], ohlcv[:, 2], ohlcv[:, 3]
     atr = _atr(high, low, close, atr_period)
     n = close.size
+    # ADX (ισχύς τάσης) μόνο αν χρειάζεται adaptive exit
+    adx_arr = None
+    if trail_atr > 0.0 and adx_thr > 0.0:
+        from .signals import adx as _adx
+        adx_arr = _adx(ohlcv, adx_period)
 
     cur_equity = equity
     pos: dict | None = None
@@ -126,7 +138,20 @@ def simulate(ohlcv: np.ndarray, sig: np.ndarray, atr_period: int,
         # --- έλεγχος εξόδου τρέχουσας θέσης ---
         if pos is not None and i > pos["entry_idx"]:
             exit_price = None
-            if pos["side"] == "buy":
+            if pos["trail"] and not np.isnan(atr[i]):
+                # TRAILING stop: ακολουθεί την ευνοϊκή ακραία τιμή (ride the trend —
+                # «μένει μέσα όσο πάει υπέρ σου, βγαίνει όταν γυρίσει trail_atr×ATR»)
+                if pos["side"] == "buy":
+                    pos["stop"] = max(pos["stop"], pos["hw"] - trail_atr * atr[i])
+                    if low[i] <= pos["stop"]:
+                        exit_price = pos["stop"]
+                    pos["hw"] = max(pos["hw"], high[i])
+                else:
+                    pos["stop"] = min(pos["stop"], pos["lw"] + trail_atr * atr[i])
+                    if high[i] >= pos["stop"]:
+                        exit_price = pos["stop"]
+                    pos["lw"] = min(pos["lw"], low[i])
+            elif pos["side"] == "buy":
                 if low[i] <= pos["stop"]:
                     exit_price = pos["stop"]
                 elif high[i] >= pos["target"]:
@@ -161,8 +186,14 @@ def simulate(ohlcv: np.ndarray, sig: np.ndarray, atr_period: int,
             else:                                             # SHORT
                 stop, target = entry + stop_dist, entry - rr_ratio * stop_dist
                 side = "sell"
+            # exit mode: σταθερό trailing, ή ADAPTIVE (τάση->trail, πλάγια->bracket)
+            use_trail = trail_atr > 0.0
+            if adx_arr is not None:
+                a = adx_arr[i]
+                use_trail = bool(not np.isnan(a) and a >= adx_thr)
             pos = {"side": side, "entry": entry, "stop": stop, "target": target,
-                   "qty": qty, "entry_idx": i}
+                   "qty": qty, "entry_idx": i, "hw": entry, "lw": entry,
+                   "trail": use_trail}
 
     if pos is not None:  # mark-to-market τυχόν ανοιχτής θέσης
         report.trades.append(_close(pos, float(close[-1]), n - 1, fee_rate,
@@ -275,10 +306,15 @@ def main() -> None:
     if args.mode:
         strat["mode"] = args.mode
     sig, max_hold = build_signal(ohlcv, strat)
+    exit_cfg = cfg.get("exit", {})
+    emode = exit_cfg.get("mode", "bracket")
+    trail = exit_cfg.get("trail_atr", 0.0) if emode in ("trailing", "adaptive") else 0.0
+    adx_t = exit_cfg.get("adx_threshold", 0.0) if emode == "adaptive" else 0.0
     report = simulate(
         ohlcv, sig, strat["atr_period"], strat["atr_sl_mult"], risk["rr_ratio"],
         equity=equity, risk_per_trade=risk["risk_per_trade"], fee_rate=fee,
         max_leverage=leverage, max_hold=max_hold, spread_bps=spread, min_fee=min_fee,
+        trail_atr=trail, adx_period=int(strat.get("adx_period", 14)), adx_thr=adx_t,
     )
     s = report.summary()
 
@@ -291,6 +327,10 @@ def main() -> None:
           f"ATR={strat['atr_period']} SLx{strat['atr_sl_mult']} RR={risk['rr_ratio']})")
     print(f" Risk/trade      : {risk['risk_per_trade']*100:.2f}%  | fee/side: {fee*100:.3f}%"
           f"  | slip: {spread:g}bps | min-fee: {min_fee:g} | max lev: {leverage:g}x")
+    _exit_desc = (f"{emode}: τάση->trail {trail:g}xATR, πλάγια->RR {risk['rr_ratio']:g} "
+                  f"(ADX>={adx_t:g})" if emode == "adaptive"
+                  else (f"trailing {trail:g}xATR" if trail else f"bracket RR {risk['rr_ratio']:g}"))
+    print(f" Exit            : {_exit_desc}")
     print("-" * 58)
     print(f" Trades          : {s['n_trades']}  (wins {s['wins']} / losses {s['losses']})")
     print(f" Win rate        : {s['win_rate']*100:.1f}%")

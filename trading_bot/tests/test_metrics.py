@@ -101,6 +101,18 @@ def test_min_fee_reduces_pnl() -> None:
         assert costly["net_pnl"] < free["net_pnl"]         # ... άρα μειώνει το PnL
 
 
+def test_trailing_and_adaptive_exit_run() -> None:
+    from strategies import runner, signals
+    ohlcv = synthetic_ohlcv(400)
+    sig = signals.donchian_breakout(ohlcv, 20)
+    s_trail = runner.simulate(ohlcv, sig, 14, 1.5, 1.0, trail_atr=3.0).summary()
+    s_adapt = runner.simulate(ohlcv, sig, 14, 1.5, 1.0, trail_atr=3.0,
+                             adx_thr=25.0).summary()          # ADX-gated adaptive
+    for s in (s_trail, s_adapt):
+        for k in ("n_trades", "net_pnl", "win_rate", "max_drawdown_pct"):
+            assert k in s
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
