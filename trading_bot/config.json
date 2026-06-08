@@ -3,7 +3,7 @@
   "risk": {
     "risk_per_trade": 0.01,
     "max_open_positions": 5,
-    "rr_ratio": 2.0,
+    "rr_ratio": 1.0,
     "max_daily_drawdown": 0.06,
     "account_equity": 10000.0
   },
