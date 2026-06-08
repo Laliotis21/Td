@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from dataclasses import replace
 
 from core.bus import AsyncMessageBus
 from core.database import Database
@@ -212,12 +213,15 @@ class ExecutionAgent(BaseAgent):
         while True:
             order: OrderIntent = await q.get()
             result = await self._execute(order)
-            await self.db.insert_trade(
+            opened = result.status in {"filled", "simulated"}
+            trade_id = await self.db.insert_trade(
                 order.ticker, order.side, order.qty, order.entry,
                 order.stop_loss, order.take_profit,
-                status="open" if result.status in {"filled", "simulated"} else "rejected",
+                status="open" if opened else "rejected",
                 strategy=order.strategy, dry_run=result.dry_run,
             )
+            if opened:                       # δώσε στο PositionManager το DB id
+                result = replace(result, trade_id=trade_id)
             await self.record(
                 f"order.{result.status}",
                 f"{order.side} {order.qty:.6f} {order.ticker} @ {order.entry} "

@@ -24,11 +24,13 @@ from core.journal import Journal
 from core.messages import (
     TOPIC_CONFIG_RELOAD,
     TOPIC_ORDER,
+    TOPIC_POSITION_CLOSED,
     TOPIC_RESULT,
     TOPIC_SIGNAL,
     ConfigReload,
     ExecutionResult,
     OrderIntent,
+    PositionClosed,
     Signal,
 )
 
@@ -49,6 +51,7 @@ class Orchestrator(BaseAgent):
         sig_q = self.bus.subscribe(TOPIC_SIGNAL)
         reload_q = self.bus.subscribe(TOPIC_CONFIG_RELOAD)
         result_q = self.bus.subscribe(TOPIC_RESULT)
+        closed_q = self.bus.subscribe(TOPIC_POSITION_CLOSED)
         mode = (await self.config.get()).get("strategy", {}).get("mode", "regime")
         self.log.info("orchestrator online (config v%s, strategy=%s)",
                       self.config.version, mode)
@@ -57,6 +60,7 @@ class Orchestrator(BaseAgent):
             self._handle_signals(sig_q),
             self._handle_reloads(reload_q),
             self._handle_results(result_q),
+            self._handle_closes(closed_q),
         )
 
     # --- hot-reload ----------------------------------------------------
@@ -74,6 +78,13 @@ class Orchestrator(BaseAgent):
             res: ExecutionResult = await q.get()
             if res.status in {"filled", "simulated"}:
                 self._open_positions += 1
+
+    async def _handle_closes(self, q: asyncio.Queue) -> None:
+        """Κλείσιμο θέσης: ελευθέρωσε slot + ενημέρωσε realized daily PnL (risk gate)."""
+        while True:
+            closed: PositionClosed = await q.get()
+            self._open_positions = max(0, self._open_positions - 1)
+            self._daily_pnl += closed.pnl
 
     # --- signal -> risk gate -> order ---------------------------------
     async def _handle_signals(self, q: asyncio.Queue) -> None:

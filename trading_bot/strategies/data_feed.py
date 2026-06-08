@@ -31,6 +31,12 @@ def _to_epoch(d: str) -> int:
     return int(dt.timestamp())
 
 
+def spot_price(product: str = "BTC-USD") -> float:
+    """Τρέχουσα τιμή από το public Coinbase ticker (no-key). π.χ. 'BTC-USD', 'ETH-USD'."""
+    url = f"https://api.exchange.coinbase.com/products/{product}/ticker"
+    return float(json.loads(_get(url))["price"])
+
+
 def fetch_coinbase(product: str, start: str, end: str,
                   interval: str = "1h") -> np.ndarray:
     """

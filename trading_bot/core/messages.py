@@ -16,6 +16,7 @@ TOPIC_SIGNAL = "signal"          # TradingView/Polymarket -> Orchestrator
 TOPIC_ORDER = "order"            # Orchestrator -> Execution
 TOPIC_RESULT = "result"          # Execution -> Journal/loop
 TOPIC_CONFIG_RELOAD = "config.reload"  # Optimization -> Orchestrator/Polymarket
+TOPIC_POSITION_CLOSED = "position.closed"  # PositionManager -> Orchestrator/Journal
 
 Action = Literal["buy", "sell", "close", "yes", "no"]
 
@@ -70,6 +71,7 @@ class ExecutionResult:
     status: str                     # "filled" | "rejected" | "simulated" | "error"
     dry_run: bool
     reason: str = ""
+    trade_id: int = 0               # DB id της θέσης (για κλείσιμο από PositionManager)
     ts: float = field(default_factory=_now)
 
 
@@ -77,4 +79,19 @@ class ExecutionResult:
 class ConfigReload:
     """Ειδοποίηση ότι νέο config.json deployαρίστηκε από τον Optimization agent."""
     version: int
+    ts: float = field(default_factory=_now)
+
+
+@dataclass(frozen=True)
+class PositionClosed:
+    """Κλείσιμο θέσης (SL/TP hit) με realized PnL — από τον PositionManager."""
+    trade_id: int
+    ticker: str
+    side: Action
+    qty: float
+    entry: float
+    exit: float
+    pnl: float                      # realized, σε νόμισμα (μετά fees)
+    reason: str                     # "take_profit" | "stop_loss"
+    dry_run: bool = True
     ts: float = field(default_factory=_now)

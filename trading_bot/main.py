@@ -19,6 +19,7 @@ from agents.livetrader_agent import LiveTraderAgent
 from agents.optimization_agent import OptimizationAgent
 from agents.orchestrator import Orchestrator
 from agents.polymarket_agent import PolymarketAgent
+from agents.position_manager import PositionManagerAgent
 from agents.tradingview_agent import TradingViewAgent
 from core.bus import AsyncMessageBus
 from core.config_manager import ConfigManager
@@ -46,6 +47,7 @@ async def main() -> None:
         PolymarketAgent(bus, db, journal, config),
         LiveTraderAgent(bus, db, journal, config),
         ExecutionAgent(bus, db, journal),
+        PositionManagerAgent(bus, db, journal),
         Orchestrator(bus, db, journal, config),
         OptimizationAgent(bus, db, journal, config),
     ]
